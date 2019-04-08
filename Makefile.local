@@ -1,0 +1,24 @@
+# Makefile
+# rules:
+# SRC-X.out += abc        # extra source: abc.c
+# MOD-X.out += abc        # extra module: abc.c abc.h
+# FLG-X.out += -finline   # extra flags
+# LIB-X.out += abc        # extra -labc options
+
+# X.out : xyz.h xyz.c # for extra dependences that are to be compiled/linked.
+
+# X => X.out
+TARGETS += demo1 concbench
+# X => X.c only
+SOURCES +=
+# X => X.c X.h
+MODULES += wh
+
+# EXTERNSRC/EXTERNDEP do not belong to this repo.
+# extern-src will be linked
+EXTERNSRC +=
+# extern-dep will not be linked
+EXTERNDEP +=
+
+FLG +=
+LIB += rt m
