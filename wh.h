@@ -45,30 +45,14 @@ typedef struct __spinlock {
   extern void
 spinlock_init(spinlock * const lock);
 
+  extern bool
+spinlock_trylock_nr(spinlock * const lock, u64 nr);
+
   extern void
 spinlock_lock(spinlock * const lock);
 
   extern void
 spinlock_unlock(spinlock * const lock);
-
-typedef struct __mutexlock {
-  union {
-    pthread_mutex_t lock;
-    u64 padding[8];
-  };
-} mutexlock;
-
-  extern void
-mutexlock_init(mutexlock * const lock);
-
-  extern void
-mutexlock_lock(mutexlock * const lock);
-
-  extern bool
-mutexlock_trylock(mutexlock * const lock);
-
-  extern void
-mutexlock_unlock(mutexlock * const lock);
 
 typedef struct __rwlock {
   union {
@@ -174,6 +158,28 @@ pages_unmap(void * const ptr, const size_t size);
   extern void
 cpu_cfence(void);
 // }}} cpucache
+
+// qsbr {{{
+struct qsbr;
+
+  extern void
+qsbr_init(struct qsbr * const q);
+
+  extern struct qsbr *
+qsbr_create(void);
+
+  extern bool
+qsbr_register(struct qsbr * const q, volatile u64 * const ptr);
+
+  extern void
+qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr);
+
+  extern void
+qsbr_wait(struct qsbr * const q, const u64 target);
+
+  extern void
+qsbr_destroy(struct qsbr * const q);
+// }}} qsbr
 
 // hash {{{
   extern u32

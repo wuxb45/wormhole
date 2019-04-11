@@ -16,6 +16,8 @@
 #include <x86intrin.h>
 // }}} headers
 
+// {{{ helpers
+
 // ansi colors {{{
 #define ANSI_FR  "\x1b[31m"
 #define ANSI_X   "\x1b[0m"
@@ -26,6 +28,12 @@
 typedef atomic_uint_least16_t   au16;
 typedef atomic_uint_least64_t   au64;
 // }}} atomic
+
+  inline u64
+bits_round_up(const u64 v, const u8 power)
+{
+  return (v + (1lu << power) - 1lu) >> power << power;
+}
 
 // cpucache {{{
 // compiler fence
@@ -56,6 +64,22 @@ spinlock_init(spinlock * const lock)
   lock->var = 0u;
 }
 
+  inline bool
+spinlock_trylock_nr(spinlock * const lock, u64 nr)
+{
+  au16 * const pvar = (typeof(pvar))&(lock->var);
+  if (0u == atomic_fetch_add(pvar, 1u))
+    return true;
+
+  do {
+    u16 z = 0u; // atomic cxhg changes z
+    if (atomic_compare_exchange_weak(pvar, &z, 1u))
+      return true;
+    _mm_pause();
+  } while (nr--);
+  return false;
+}
+
   inline void
 spinlock_lock(spinlock * const lock)
 {
@@ -73,43 +97,6 @@ spinlock_lock(spinlock * const lock)
 spinlock_unlock(spinlock * const lock)
 {
   lock->var = 0u;
-}
-
-  inline void
-mutexlock_init(mutexlock * const lock)
-{
-  pthread_mutex_init(&(lock->lock), NULL);
-}
-
-  inline void
-mutexlock_lock(mutexlock * const lock)
-{
-  do {
-    const int r = pthread_mutex_lock(&(lock->lock));
-    if (r == 0) return;
-    else if (r != EAGAIN) exit(0);
-  } while (true);
-}
-
-  inline bool
-mutexlock_trylock(mutexlock * const lock)
-{
-  do {
-    const int r = pthread_mutex_trylock(&(lock->lock));
-    if (r == 0) return true;
-    else if (r == EBUSY) return false;
-    else if (r != EAGAIN) exit(0);
-  } while (true);
-}
-
-  inline void
-mutexlock_unlock(mutexlock * const lock)
-{
-  do {
-    const int r = pthread_mutex_unlock(&(lock->lock));
-    if (r == 0) return;
-    else if ((r != EAGAIN)) exit(0);
-  } while (true);
 }
 
 #define RWLOCK_WSHIFT ((15))
@@ -627,6 +614,8 @@ slab_destroy(struct slab * const slab)
 }
 // }}} slab
 
+// }}} helpers
+
 // hash {{{
 #define CRC32C_SEED ((0xDEADBEEFu))
   static inline u32
@@ -696,106 +685,127 @@ crc32c_extend(const u32 lo)
 // }}} hash
 
 // qsbr {{{
-#define QSBR_STATES_NR ((492))
-#define QSBR_BITMAP_NR  ((8))
-struct qsbr {
-  mutexlock lock;
-  u64 target;
-  u64 bitmap[QSBR_BITMAP_NR];
-  volatile u64 * ptrs[QSBR_STATES_NR];
+#define QSBR_STATES_NR ((22)) // 3*8-2
+#define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1lu)
+#define QSBR_SHARDS_NR  ((32))
+#define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARDS_NR))
+// QSBR_CAPACITY == 22 * 32 == 704
+struct qsbr { // 1 + (3 * 32) = 97 lines
+  volatile u64 target;
+  u64 padding0[7];
+  struct qshard {
+    spinlock lock;
+    u64 bitmap;
+    volatile u64 * ptrs[QSBR_STATES_NR];
+  } shards[QSBR_SHARDS_NR];
+  volatile u64 * wait_ptrs[QSBR_CAPACITY];
 };
 
-  static inline struct qsbr *
+  inline struct qsbr *
 qsbr_create(void)
 {
-  debug_assert(sizeof(struct qsbr) <= PGSZ);
-  struct qsbr * const q = (typeof(q))pages_alloc_4kb(1);
-  mutexlock_init(&(q->lock));
+  struct qsbr * const q = yalloc(sizeof(*q));
+  memset(q, 0, sizeof(*q));
   return q;
 }
 
-  static inline bool
+  static inline struct qshard *
+qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
+{
+  const u32 sid = _mm_crc32_u64(0xDEADBEEFu, (u64)ptr) & ((u32)(QSBR_SHARDS_NR-1));
+  debug_assert(sid < QSBR_SHARDS_NR);
+  return &(q->shards[sid]);
+}
+
+  inline bool
 qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
 {
-  if (ptr == NULL) return false;
-  mutexlock_lock(&(q->lock));
-  for (u64 i = 0; i < QSBR_BITMAP_NR; i++) {
-    const u64 bits = q->bitmap[i];
-    if (bits != (~0lu)) { // bits contains zero
-      const u64 pos0 = __builtin_ctzl(~bits);
-      const u64 pos = (i << 6) + pos0;
-      if (pos < QSBR_STATES_NR) {
-        q->bitmap[i] |= (1lu << pos0);
-        q->ptrs[pos] = ptr;
-        mutexlock_unlock(&(q->lock));
-        return true;
-      }
-    }
+  if (ptr == NULL)
+    return false;
+  struct qshard * const shard = qsbr_shard(q, ptr);
+  spinlock_lock(&(shard->lock));
+
+  if (shard->bitmap < QSBR_BITMAP_FULL) {
+    const u64 pos = __builtin_ctzl(~(shard->bitmap));
+    debug_assert(pos < QSBR_STATES_NR);
+    shard->bitmap |= (1lu << pos);
+    shard->ptrs[pos] = ptr;
+    spinlock_unlock(&(shard->lock));
+    return true;
   }
-  mutexlock_unlock(&(q->lock));
+  spinlock_unlock(&(shard->lock));
   return false;
 }
 
-  static inline void
+  inline void
 qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 {
-  while (mutexlock_trylock(&(q->lock)) == false) {
+  if (ptr == NULL)
+    return;
+  struct qshard * const shard = qsbr_shard(q, ptr);
+  while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
     (*ptr) = q->target;
     _mm_pause();
   }
-  for (u64 i = 0; i < QSBR_BITMAP_NR; i++) {
-    u64 bits = q->bitmap[i];
-    while (bits) { // bits contains zero
-      const u64 pos0 = __builtin_ctzl(bits);
-      const u64 pos = (i << 6) + pos0;
-      if (q->ptrs[pos] == ptr) {
-        q->bitmap[i] &= (~(1lu << pos0));
-        q->ptrs[pos] = NULL;
-        mutexlock_unlock(&(q->lock));
-        return;
-      }
-      bits &= (~(1lu << pos0));
+
+  u64 bits = shard->bitmap;
+  debug_assert(bits < QSBR_BITMAP_FULL);
+  while (bits) { // bits contains ones
+    const u64 pos = __builtin_ctzl(bits);
+    debug_assert(pos < QSBR_STATES_NR);
+    if (shard->ptrs[pos] == ptr) {
+      shard->bitmap &= (~(1lu << pos));
+      shard->ptrs[pos] = NULL;
+      spinlock_unlock(&(shard->lock));
+      return;
     }
+    bits &= (~(1lu << pos));
   }
-  mutexlock_unlock(&(q->lock));
+  debug_die();
+  spinlock_unlock(&(shard->lock));
 }
 
-  static inline void
+// waiters needs external synchronization
+  inline void
 qsbr_wait(struct qsbr * const q, const u64 target)
 {
-  mutexlock_lock(&(q->lock));
-  u64 bm[QSBR_BITMAP_NR] = {};
-  u64 rem = 0;
   q->target = target;
-  for (u64 i = 0; i < QSBR_BITMAP_NR; i++) {
-    bm[i] = q->bitmap[i];
-    rem += __builtin_popcountl(bm[i]);
+  for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
+    spinlock_lock(&(q->shards[i].lock));
+
+  // collect wait_ptrs
+  volatile u64 ** const wait_ptrs = q->wait_ptrs;
+  u64 nwait = 0;
+  for (u64 i = 0; i < QSBR_SHARDS_NR; i++) {
+    struct qshard * const shard = &(q->shards[i]);
+    u64 bits = shard->bitmap;
+    while (bits) { // bits contains ones
+      const u64 pos = __builtin_ctzl(bits);
+      debug_assert(pos < QSBR_STATES_NR);
+      if (*(shard->ptrs[pos]) != target)
+        wait_ptrs[nwait++] = shard->ptrs[pos];
+      bits &= (~(1lu << pos));
+    }
   }
 
-  const u64 t0 = rdtsc();
-  while ((rdtsc() - t0) < 1000lu);
   // wait
-  while (rem) {
-    for (u64 i = 0; i < QSBR_BITMAP_NR; i++) {
-      u64 bits = bm[i];
-      while (bits) { // bits contains zero
-        const u64 pos0 = __builtin_ctzl(bits);
-        const u64 pos = (i << 6) + pos0;
-        if (target == (*(q->ptrs[pos]))) {
-          bm[i] &= (~(1lu << pos0));
-          rem--;
-        }
-        bits &= (~(1lu << pos0));
+  while (nwait) {
+    for (u64 i = nwait - 1; i + 1; i--) { // nwait - 1 to 0
+      if ((*(wait_ptrs[i])) == target) {
+        if (i < (nwait - 1))
+          wait_ptrs[i] = wait_ptrs[nwait - 1];
+        nwait--;
       }
     }
   }
-  mutexlock_unlock(&(q->lock));
+  for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
+    spinlock_unlock(&(q->shards[i].lock));
 }
 
-  static inline void
+  inline void
 qsbr_destroy(struct qsbr * const q)
 {
-  pages_unmap(q, PGSZ);
+  free(q);
 }
 #undef QSBR_STATES_NR
 #undef QSBR_BITMAP_NR
@@ -1202,7 +1212,7 @@ static const struct kvmap_mm __kvmap_mm_default = {
 // def {{{
 #define WH_HMAPINIT_SIZE ((1lu << 14)) // 256k/1MB
 #define WH_SLABMETA_SIZE ((1lu << 21)) // 2MB
-#define WH_SLABLEAF_SIZE ((1lu << 30)) // 1GB; change to 2MB if no 1GB hugepages
+#define WH_SLABLEAF_SIZE ((1lu << 24)) // 2MB; change to (1lu << 30) for 1GB hugepages
 #define WH_KPN ((128u)) // keys per node; power of 2
 #define WH_MID ((WH_KPN >> 1)) // ideal cut point for split, the closer the better
 
@@ -1252,8 +1262,8 @@ struct wormhmap {
   u32 maxplen;
   u32 hmap_id; // 0 or 1
   struct wormhole * map;
-  u64 wsize;
-  u64 psize;
+  u64 msize;
+  struct wormhmap * sibling;
 };
 
 struct wormhole {
@@ -1322,7 +1332,7 @@ wormhole_alloc_kv(struct wormhole * const map, const size_t klen, const size_t v
 wormhole_alloc_leaf(struct wormhole * const map, struct wormleaf * const prev,
     struct wormleaf * const next, struct kv * const anchor)
 {
-  struct wormleaf * const leaf = (typeof(leaf))slab_alloc(map->slab_leaf);
+  struct wormleaf * const leaf = slab_alloc(map->slab_leaf);
   debug_assert(leaf);
   rwlock_init(&(leaf->leaflock));
   leaf->version = 0;
@@ -1340,7 +1350,7 @@ wormhole_alloc_leaf(struct wormhole * const map, struct wormleaf * const prev,
 wormhole_alloc_meta_keyref(struct slab * const slab, struct wormleaf * const lrmost,
     struct kv * const keyref, const u64 hash, const u32 klen)
 {
-  struct wormmeta * const meta = (typeof(meta))slab_alloc_unsafe(slab);
+  struct wormmeta * const meta = slab_alloc_unsafe(slab);
   debug_assert(meta);
   keyref->refcnt++;
   meta->hash32 = (u32)hash;
@@ -1676,23 +1686,17 @@ wormhole_hmap_expand(struct wormhmap * const hmap)
   const u64 nr0 = mask0 + 1lu;
   const u64 mask1 = mask0 + nr0;
   const u64 nr1 = nr0 << 1;
-  u64 wsize = nr1 * sizeof(hmap->wmap[0]);
-  u64 psize = nr1 * sizeof(hmap->pmap[0]);
-  struct wormslot * const ws = pages_alloc_best(wsize, true, &wsize);
-  struct kvbucket * const ps = pages_alloc_best(psize, true, &psize);
-  if ((ps == NULL) || (ws == NULL)) {
-    if (ws)
-      pages_unmap(ws, wsize);
-    if (ps)
-      pages_unmap(ps, psize);
+  const u64 wsize = nr1 * sizeof(hmap->wmap[0]);
+  const u64 psize = nr1 * sizeof(hmap->pmap[0]);
+  u64 msize = bits_round_up(wsize + psize, 21);
+  u8 * const mem = pages_alloc_best(msize, true, &msize);
+  if (mem == NULL)
     return false;
-  }
 
   struct wormhmap hmap1 = *hmap;
-  hmap1.wmap = ws;
-  hmap1.wsize = wsize;
-  hmap1.pmap = ps;
-  hmap1.psize = psize;
+  hmap1.pmap = (typeof(hmap1.pmap))mem;
+  hmap1.wmap = (typeof(hmap1.wmap))(mem + psize);
+  hmap1.msize = msize;
   hmap1.mask = mask1;
 
   const struct kvbucket * const pmap0 = hmap->pmap;
@@ -1713,8 +1717,7 @@ wormhole_hmap_expand(struct wormhmap * const hmap)
       hmap1.pmap[idx1].e[n].e3 = ptr_to_u64(meta);
     }
   }
-  pages_unmap(hmap->wmap, hmap->wsize);
-  pages_unmap(hmap->pmap, hmap->psize);
+  pages_unmap(hmap->pmap, hmap->msize);
   *hmap = hmap1;
   wormhole_hmap_squeeze(hmap);
   return true;
@@ -1815,21 +1818,25 @@ wormhole_hmap_del(struct wormhmap * const hmap, const struct kv * const key)
     || wormhole_hmap_del_slot(hmap, midy, key, skey);
 }
 
-  static void
+  static bool
 wormhole_hmap_init(struct wormhmap * const hmap, struct wormhole * const map, const u64 i)
 {
   const u64 nr = WH_HMAPINIT_SIZE;
   const u64 wsize = sizeof(hmap->wmap[0]) * nr;
   const u64 psize = sizeof(hmap->pmap[0]) * nr;
-  hmap->wmap = pages_alloc_best(wsize, true, &(hmap->wsize));
-  hmap->pmap = pages_alloc_best(psize, true, &(hmap->psize));
-  debug_assert(hmap->wmap);
-  debug_assert(hmap->pmap);
+  u64 msize = bits_round_up(wsize + psize, 21);
+  u8 * const mem = pages_alloc_best(msize, true, &msize);
+  if (mem == NULL)
+    return false;
+  hmap->pmap = (typeof(hmap->pmap))mem;
+  hmap->wmap = (typeof(hmap->wmap))(mem + psize);
+  hmap->msize = msize;
   hmap->mask = nr - 1lu;
   hmap->version = 0;
   hmap->map = map;
   hmap->maxplen = 0u;
   hmap->hmap_id = i;
+  return true;
 }
 // }}} hmap
 
@@ -1860,14 +1867,17 @@ wormhole_create_leaf0(struct wormhole * const map)
   struct wormhole *
 wormhole_create(const struct kvmap_mm * const mm)
 {
+  // TODO: fail gracefully if some memory allocations cannot be made
   struct wormhole * const map = yalloc(sizeof(*map));
   memset(map, 0, sizeof(*map));
   // mm
   map->mm = mm ? (*mm) : __kvmap_mm_default;
 
   // hmap
-  for (u64 i = 0; i < 2; i++)
-    wormhole_hmap_init(&(map->hmap2[i]), map, i);
+  for (u64 i = 0; i < 2; i++) {
+    (void)wormhole_hmap_init(&(map->hmap2[i]), map, i);
+    map->hmap2[i].sibling = &(map->hmap2[1-i]);
+  }
 
   // slabs
   map->slab_meta[0] = slab_create(sizeof(struct wormmeta), WH_SLABMETA_SIZE);
@@ -2410,7 +2420,6 @@ wormhole_split_leaf(struct wormhole * const map, struct wormleaf * const leaf1, 
 
   // anchor of leaf2
   wormhole_split_anchor(leaf1, leaf2);
-  rwlock_lock_write(&(leaf2->leaflock));
   return leaf2;
 }
 
@@ -2528,12 +2537,6 @@ wormhole_split_meta_hmap(struct wormhmap * const hmap, struct wormleaf * const l
   mkey->klen = mklen;
 }
 
-  static inline struct wormhmap *
-wormhole_hmap_sibling(struct wormhole * const map, struct wormhmap * const hmap0)
-{
-  return (&(map->hmap2[0])) == hmap0 ? (&(map->hmap2[1])) : (&(map->hmap2[0]));
-}
-
 // all locks will be released before returning
   static void
 wormhole_split_meta_ref(struct wormref * const ref, struct wormleaf * const leaf2)
@@ -2552,7 +2555,7 @@ wormhole_split_meta_ref(struct wormref * const ref, struct wormleaf * const leaf
 
   cpu_cfence();
   struct wormhmap * const hmap0 = map->hmap;
-  struct wormhmap * const hmap1 = wormhole_hmap_sibling(map, hmap0);
+  struct wormhmap * const hmap1 = hmap0->sibling;
 
   // link
   struct wormleaf * const leaf1 = leaf2->prev;
@@ -2604,6 +2607,7 @@ wormhole_split_insert(struct wormref * const ref, struct wormleaf * const leaf1,
 
   struct wormhole * const map = ref->map;
   struct wormleaf * const leaf2 = wormhole_split_leaf(map, leaf1, cut);
+  rwlock_lock_write(&(leaf2->leaflock));
 
   // the compare must regard the anchor's extensions
   const int cmp = kv_keycompare(new, leaf2->anchor);
@@ -2619,7 +2623,6 @@ wormhole_split_insert(struct wormref * const ref, struct wormleaf * const leaf1,
 wormhole_split_meta_unsafe(struct wormhole * const map, struct wormleaf * const leaf2)
 {
   struct wormhmap * const hmap0 = map->hmap;
-  struct wormhmap * const hmap1 = wormhole_hmap_sibling(map, hmap0);
 
   // new versions
   struct wormleaf * const leaf1 = leaf2->prev;
@@ -2633,7 +2636,7 @@ wormhole_split_meta_unsafe(struct wormhole * const map, struct wormleaf * const 
   kv_dup2_key(leaf2->anchor, mkey);
   mkey->kv[mkey->klen] = 0u;
   wormhole_prefix_inc_short(mkey, mkey->klen + 1u);
-  wormhole_split_meta_hmap(hmap1, leaf2, mkey);
+  wormhole_split_meta_hmap(hmap0->sibling, leaf2, mkey);
   wormhole_split_meta_hmap(hmap0, leaf2, mkey);
   if (mkey->refcnt == 0) // this is possible
     free(mkey);
@@ -2826,7 +2829,7 @@ wormhole_merge_ref(struct wormref * const ref, struct wormleaf * const leaf1, st
 
   struct wormhole * const map = ref->map;
   struct wormhmap * const hmap0 = map->hmap;
-  struct wormhmap * const hmap1 = wormhole_hmap_sibling(map, hmap0);
+  struct wormhmap * const hmap1 = hmap0->sibling;
   const u64 v1 = hmap0->version + 1;
 
   leaf1->next = leaf2->next;
@@ -2932,12 +2935,11 @@ wormhole_merge_unsafe(struct wormhole * const map, struct wormleaf * const leaf1
 {
   wormhole_merge_leaf_move(leaf1, leaf2);
   struct wormhmap * const hmap0 = map->hmap;
-  struct wormhmap * const hmap1 = wormhole_hmap_sibling(map, hmap0);
 
   leaf1->next = leaf2->next;
   if (leaf2->next)
     leaf2->next->prev = leaf1;
-  wormhole_merge_meta(hmap1, leaf2);
+  wormhole_merge_meta(hmap0->sibling, leaf2);
   wormhole_merge_meta(hmap0, leaf2);
   free(leaf2->anchor);
   slab_free(map->slab_leaf, leaf2);
@@ -2967,7 +2969,7 @@ wormhole_del_unsafe(struct wormhole * const map, const struct kv * const key)
   inline struct wormref *
 wormhole_ref(struct wormhole * const map)
 {
-  struct wormref * const ref = yalloc(sizeof(*ref));
+  struct wormref * const ref = malloc(sizeof(*ref));
   ref->qstate = 0lu;
   ref->map = map;
   const bool r = qsbr_register(map->qsbr, &(ref->qstate));
@@ -3032,10 +3034,8 @@ wormhole_destroy(struct wormhole * const map)
 {
   //wormhole_verify(map);
   wormhole_clean1(map);
-  for (u64 x = 0; x < 2; x++) {
-    pages_unmap(map->hmap2[x].wmap, map->hmap2[x].wsize);
-    pages_unmap(map->hmap2[x].pmap, map->hmap2[x].psize);
-  }
+  for (u64 x = 0; x < 2; x++)
+    pages_unmap(map->hmap2[x].pmap, map->hmap2[x].msize);
   qsbr_destroy(map->qsbr);
   slab_destroy(map->slab_meta[0]);
   slab_destroy(map->slab_meta[1]);
@@ -3152,8 +3152,8 @@ wormhole_fprint(struct wormhole * const map, FILE * const out)
   const u64 meta_size0 = wormhole_count_meta(&(map->hmap2[0]), true);
   const u64 meta_size1 = wormhole_count_meta(&(map->hmap2[1]), true);
   const u64 meta_size = meta_size0 + meta_size1;
-  const u64 hash_size0 = map->hmap2[0].psize + map->hmap2[0].wsize;
-  const u64 hash_size1 = map->hmap2[1].psize + map->hmap2[1].wsize;
+  const u64 hash_size0 = map->hmap2[0].msize;
+  const u64 hash_size1 = map->hmap2[1].msize;
   const u64 hash_size = hash_size0 + hash_size1;
   const u64 full_size = meta_size + leaf_size + data_size + hash_size;
   const double pdata = ((double)data_size) * 100.0 / ((double)full_size);
