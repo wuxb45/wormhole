@@ -65,6 +65,9 @@ typedef struct __rwlock {
 rwlock_init(rwlock * const lock);
 
   extern bool
+rwlock_trylock_read(rwlock * const lock);
+
+  extern bool
 rwlock_trylock_read_nr(rwlock * const lock, u64 nr);
 
   extern void

@@ -29,7 +29,7 @@ typedef atomic_uint_least16_t   au16;
 typedef atomic_uint_least64_t   au64;
 // }}} atomic
 
-  inline u64
+  static inline u64
 bits_round_up(const u64 v, const u8 power)
 {
   return (v + (1lu << power) - 1lu) >> power << power;
@@ -562,7 +562,7 @@ slab_create(const u64 obj_size, const u64 blk_size)
   return slab;
 }
 
-  inline void *
+  static inline void *
 slab_alloc_unsafe(struct slab * const slab)
 {
   if (slab->obj_head == NULL) {
@@ -575,7 +575,7 @@ slab_alloc_unsafe(struct slab * const slab)
   return (void *)obj;
 }
 
-  inline void *
+  static inline void *
 slab_alloc(struct slab * const slab)
 {
   spinlock_lock(&(slab->lock));
@@ -584,7 +584,7 @@ slab_alloc(struct slab * const slab)
   return ptr;
 }
 
-  inline void
+  static inline void
 slab_free_unsafe(struct slab * const slab, void * const ptr)
 {
   struct slab_object * const obj = (typeof(obj))ptr;
@@ -593,7 +593,7 @@ slab_free_unsafe(struct slab * const slab, void * const ptr)
   slab->nr_alloc--;
 }
 
-  inline void
+  static inline void
 slab_free(struct slab * const slab, void * const ptr)
 {
   spinlock_lock(&(slab->lock));
@@ -653,7 +653,7 @@ crc32c_inc_x4(const u8 * buf, size_t nr, u32 crc)
   return crc;
 }
 
-  inline u32
+  static inline u32
 crc32c_inc(const u8 * buf, size_t nr, u32 crc)
 {
 #pragma nounroll

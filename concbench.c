@@ -8,7 +8,7 @@
 #include <stdatomic.h>
 #include "wh.h"
 
-  inline u64
+  static inline u64
 xorshift(const u64 seed)
 {
   u64 x = seed ? seed : rdtsc();
@@ -20,7 +20,7 @@ xorshift(const u64 seed)
 
 static __thread u64 __random_seed_u64 = 0;
 
-  inline u64
+  static inline u64
 random_u64(void)
 {
   __random_seed_u64 = xorshift(__random_seed_u64);
