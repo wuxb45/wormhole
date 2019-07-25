@@ -87,6 +87,9 @@ rwlock_lock_write(rwlock * const lock);
 
   extern void
 rwlock_unlock_write(rwlock * const lock);
+
+  extern void
+rwlock_write_to_read(rwlock * const lock);
 // }}} locks
 
 // timing {{{

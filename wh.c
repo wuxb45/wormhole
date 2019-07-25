@@ -180,6 +180,20 @@ rwlock_unlock_write(rwlock * const lock)
   au16 * const pvar = (typeof(pvar))(&(lock->var));
   atomic_fetch_sub(pvar, RWLOCK_WBIT);
 }
+
+  inline void
+rwlock_write_to_read(rwlock * const lock)
+{
+  au16 * const pvar = (typeof(pvar))(&(lock->var));
+  do {
+    u16 v0 = *pvar;
+    debug_assert(v0 & RWLOCK_WBIT);
+    debug_assert(((v0 + 1u - RWLOCK_WBIT) & RWLOCK_WBIT) == 0u); // corner case
+    // +R -W
+    if (atomic_compare_exchange_weak(pvar, &v0, v0 + 1u - RWLOCK_WBIT))
+      break;
+  } while (true);
+}
 #undef RWLOCK_WBIT
 // }}} locking
 
@@ -3166,6 +3180,7 @@ wormhole_fprint(struct wormhole * const map, FILE * const out)
       full_size >> 20, data_size >> 20, leaf_size >> 20, meta_size >> 20, hash_size >> 20);
 }
 
+// iter {{{
   struct wormhole_iter *
 wormhole_iter_create(struct wormref * const ref)
 {
@@ -3209,14 +3224,17 @@ wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const ke
     struct wormleaf * const leaf0 = iter->ref->map->leaf0;
     iter->leaf = leaf0;
     iter->next_id = 0;
-    while (rwlock_trylock_read_nr(&(leaf0->leaflock), 64) == false)
+    while (rwlock_trylock_write_nr(&(leaf0->leaflock), 64) == false)
       ref->qstate = (u64)(map->hmap);
     wormhole_leaf_sync_sorted(leaf0);
+    rwlock_write_to_read(&(leaf0->leaflock));
     return;
   }
 
-  struct wormleaf * const leaf = wormhole_jump_leaf_read(ref, key);
+  struct wormleaf * const leaf = wormhole_jump_leaf_write(ref, key);
   wormhole_leaf_sync_sorted(leaf);
+  rwlock_write_to_read(&(leaf->leaflock));
+
   const u64 id = wormhole_leaf_bisect_sorted(leaf, key);
   if (id < leaf->nr_sorted) {
     iter->leaf = leaf;
@@ -3226,9 +3244,10 @@ wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const ke
     iter->leaf = next;
     iter->next_id = 0;
     if (next) {
-      while (rwlock_trylock_read_nr(&(next->leaflock), 64) == false)
+      while (rwlock_trylock_write_nr(&(next->leaflock), 64) == false)
         ref->qstate = (u64)(map->hmap);
       wormhole_leaf_sync_sorted(next);
+      rwlock_write_to_read(&(next->leaflock));
     }
     rwlock_unlock_read(&(leaf->leaflock));
   }
@@ -3237,20 +3256,23 @@ wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const ke
   struct kv *
 wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out)
 {
-  if (iter->leaf == NULL) return NULL;
+  if (iter->leaf == NULL)
+    return NULL;
   while (iter->next_id >= iter->leaf->nr_sorted) {
     struct wormleaf * const next = iter->leaf->next;
     if (next) {
       struct wormref * const ref = iter->ref;
       struct wormhole * const map = ref->map;
-      while (rwlock_trylock_read_nr(&(next->leaflock), 64) == false)
+      while (rwlock_trylock_write_nr(&(next->leaflock), 64) == false)
         ref->qstate = (u64)(map->hmap);
+      wormhole_leaf_sync_sorted(next);
+      rwlock_write_to_read(&(next->leaflock));
     }
     rwlock_unlock_read(&(iter->leaf->leaflock));
     iter->leaf = next;
-    if (iter->leaf == NULL) return NULL;
     iter->next_id = 0;
-    wormhole_leaf_sync_sorted(iter->leaf);
+    if (next == NULL)
+      return NULL;
   }
   debug_assert(iter->leaf);
   debug_assert(iter->next_id < iter->leaf->nr_sorted);
@@ -3267,6 +3289,7 @@ wormhole_iter_destroy(struct wormhole_iter * const iter)
     rwlock_unlock_read(&(iter->leaf->leaflock));
   free(iter);
 }
+// }}} iter
 // }}} misc
 
 // undef {{{
