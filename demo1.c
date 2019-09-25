@@ -17,7 +17,7 @@ scan_trace(FILE * const input)
   rewind(input);
   u64 count = 0;
   while (getline(&__buf, &__size, input) > 0) count++;
-  printf("lines %lu\n", count);
+  printf("#lines %lu\n", count);
   free(__buf);
   __kv = malloc(__size + 64);
   __buf = (char *)__kv->kv;
@@ -36,7 +36,7 @@ wh_set(struct wormref * const ref, FILE * input)
     wormhole_set(ref, __kv);
     count++;
   }
-  printf("insert/update %lu (== lines)\n", count);
+  printf("insert/update %lu (== #lines)\n", count);
 }
 
   static void
@@ -51,7 +51,7 @@ wh_get(struct wormref * const ref, FILE * input)
     if (wormhole_get(ref, __kv, __out))
       hit++;
   }
-  printf("get hit %lu (== lines)\n", hit);
+  printf("get hit %lu (== #lines)\n", hit);
 }
 
   static void
@@ -66,7 +66,7 @@ wh_probe(struct wormref * const ref, FILE * input)
     if (wormhole_probe(ref, __kv))
       hit++;
   }
-  printf("probe hit %lu (== lines)\n", hit);
+  printf("probe hit %lu (== #lines)\n", hit);
 }
 
   static void
@@ -78,7 +78,7 @@ wh_iter(struct wormref * const ref, FILE * input)
   u64 count = 0;
   while (wormhole_iter_next(iter, tmp1))
     count++;
-  printf("unique keys %lu (<= lines)\n", count);
+  printf("unique keys %lu (<= #lines)\n", count);
 
   count = 0;
   rewind(input);
@@ -98,7 +98,7 @@ wh_iter(struct wormref * const ref, FILE * input)
     for (u64 i = 0; i < 99; i++)
       fgets(__buf, __size, input);
   } while (true);
-  printf("seek-scan keys %lu (<= lines)\n", count);
+  printf("seek-scan keys %lu (should be very close to #lines)\n", count);
   // iter may hold a leaf lock. Destroy it.
   wormhole_iter_destroy(iter);
   free(tmp1);

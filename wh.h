@@ -345,11 +345,20 @@ wormhole_iter_create(struct wormref * const ref);
   extern void
 wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const key);
 
+  extern void
+wormhole_iter_seek_unsafe(struct wormhole_iter * const iter, const struct kv * const key);
+
   extern struct kv *
 wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out);
 
+  extern struct kv *
+wormhole_iter_next_unsafe(struct wormhole_iter * const iter, struct kv * const out);
+
   extern void
 wormhole_iter_destroy(struct wormhole_iter * const iter);
+
+  extern void
+wormhole_iter_destroy_unsafe(struct wormhole_iter * const iter);
 
 // the unsafe API
 

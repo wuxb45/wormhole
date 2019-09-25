@@ -145,6 +145,7 @@ main(int argc, char ** argv)
     const double dt = thread_fork_join(nth, (void *)kv_probe_worker, (void *)wh);
     const double mops = ((double)__tot) / dt * 1e-6;
     printf("probe x%lu %.2lf mops\n", nth, mops);
+    sleep(1);
   }
 
   // final clean up for valgrind
