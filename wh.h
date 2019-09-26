@@ -193,6 +193,15 @@ crc32c(const void * const ptr, const size_t size);
 // }}} hash
 
 // kv {{{
+/*
+ * Some internal union names can be ignored:
+ * struct kv {
+ *   u32 klen;
+ *   u32 vlen;
+ *   u64 hash;
+ *   u8 kv[];
+ * };
+ */
 struct kv {
   union { // the first u64
     u64 kvlen;
@@ -312,6 +321,7 @@ struct kvmap_mm {
 struct wormhole;
 struct wormref;
 
+// please pass NULL to create
   extern struct wormhole *
 wormhole_create(const struct kvmap_mm * const mm);
 
