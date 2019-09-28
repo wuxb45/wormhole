@@ -100,3 +100,8 @@ but not the other objects in Wormhole, such as hash table and tree nodes.
 Wormhole uses hugepages when available. To reserve some hugepages in Linux (10000 * 2MB):
 
     # echo 10000 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+
+### Performance
+Some benchmarking results with some real-world datasets: See [this](https://github.com/wuxb45/wormhole/issues/5) page for more information.
+
+![Concurrent GET](https://user-images.githubusercontent.com/564235/65822621-123dc100-e20d-11e9-83d5-b423d0582b0c.png)
