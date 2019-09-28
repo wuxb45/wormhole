@@ -989,16 +989,6 @@ kv_retire_free(struct kv * const kv, void * const priv)
   free(kv);
 }
 
-  static inline struct kv *
-kv_mm_dup(const struct kv * const kv, const struct kvmap_mm * const mm)
-{
-  const u64 sz = kv_size(kv);
-  struct kv * const new = mm->af(sz, mm->ap);
-  debug_assert(new);
-  memcpy(new, kv, sz);
-  return new;
-}
-
 // key1 and key2 must be valid ptr
   inline bool
 kv_keymatch(const struct kv * const key1, const struct kv * const key2)
