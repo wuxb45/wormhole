@@ -30,11 +30,20 @@ typedef atomic_uint_least16_t   au16;
 typedef atomic_uint_least64_t   au64;
 // }}} atomic
 
+// bits {{{
+  inline u64
+bits_p2_up(const u64 v)
+{
+  // clz(0) is undefined
+  return (v > 1) ? (1lu << (64lu - (u64)__builtin_clzl(v - 1lu))) : v;
+}
+
   static inline u64
 bits_round_up(const u64 v, const u8 power)
 {
   return (v + (1lu << power) - 1lu) >> power << power;
 }
+// }}} bits
 
 // cpucache {{{
 // compiler fence
@@ -318,87 +327,191 @@ debug_catch_fatals(void)
 // }}} debug
 
 // process/thread {{{
-  static inline cpu_set_t *
-__cpu_set_alloc(size_t * const size_out)
+static u64 process_ncpu;
+static u64 process_cpu_set_size;
+
+__attribute__((constructor))
+  static void
+process_init(void)
 {
-  const int ncpu = sysconf(_SC_NPROCESSORS_CONF);
-  const size_t s1 = CPU_ALLOC_SIZE(ncpu);
+  process_ncpu = sysconf(_SC_NPROCESSORS_CONF);
+  const size_t s1 = CPU_ALLOC_SIZE(process_ncpu);
   const size_t s2 = sizeof(cpu_set_t);
-  const size_t size = s1 > s2 ? s1 : s2;
-  *size_out = size;
-  cpu_set_t * const set = malloc(size);
-  return set;
+  process_cpu_set_size = s1 > s2 ? s1 : s2;
+}
+
+  u64
+process_get_rss(void)
+{
+  u64 size, rss = 0;
+  FILE * const fp = fopen("/proc/self/statm", "r");
+  if (fp == NULL)
+    return 0;
+  fscanf(fp, "%lu %lu", &size, &rss);
+  fclose(fp);
+  return rss * (u64)sysconf(_SC_PAGESIZE);
+}
+
+  static inline cpu_set_t *
+process_cpu_set_alloc(void)
+{
+  return malloc(process_cpu_set_size);
 }
 
   u64
 process_affinity_core_count(void)
 {
-  size_t xsize = 0;
-  cpu_set_t * const set = __cpu_set_alloc(&xsize);
-  if (sched_getaffinity(0, xsize, set) != 0) {
-    return sysconf(_SC_NPROCESSORS_CONF);
+  cpu_set_t * const set = process_cpu_set_alloc();
+  if (sched_getaffinity(0, process_cpu_set_size, set) != 0) {
+    free(set);
+    return process_ncpu;
   }
-  const int nr = CPU_COUNT_S(xsize, set);
+
+  const int nr = CPU_COUNT_S(process_cpu_set_size, set);
   free(set);
-  return (nr > 0) ? nr : sysconf(_SC_NPROCESSORS_CONF);
+  return nr ? nr : process_ncpu;
+}
+
+  u64
+process_affinity_core_list(const u64 max, u64 * const cores)
+{
+  memset(cores, 0, max * sizeof(cores[0]));
+  cpu_set_t * const set = process_cpu_set_alloc();
+  if (sched_getaffinity(0, process_cpu_set_size, set) != 0)
+    return 0;
+
+  const u64 nr_affinity = CPU_COUNT_S(process_cpu_set_size, set);
+  const u64 nr = nr_affinity < max ? nr_affinity : max;
+  u64 j = 0;
+  for (u64 i = 0; i < process_ncpu; i++) {
+    if (CPU_ISSET_S((int)i, process_cpu_set_size, set)) {
+      cores[j++] = i;
+    }
+    if (j >= nr) break;
+  }
+  free(set);
+  return j;
+}
+
+  u64
+process_cpu_time_usec(void)
+{
+  struct rusage r;
+  getrusage(RUSAGE_SELF, &r);
+  const u64 usr = (r.ru_utime.tv_sec * 1000000lu) + r.ru_utime.tv_usec;
+  const u64 sys = (r.ru_stime.tv_sec * 1000000lu) + r.ru_stime.tv_usec;
+  return usr + sys;
+}
+
+  void
+thread_set_affinity(const u64 cpu)
+{
+  cpu_set_t * const set = process_cpu_set_alloc();
+
+  CPU_ZERO_S(process_cpu_set_size, set);
+  CPU_SET_S(cpu % process_ncpu, process_cpu_set_size, set);
+  sched_setaffinity(0, process_cpu_set_size, set);
+  free(set);
+}
+
+struct fork_join_info {
+  u64 tot;
+  u64 rank; // 0 to n-1
+  u64 core;
+  pthread_t tid;
+  void *(*func)(void *);
+  void * argv;
+  struct fork_join_info * all;
+  u64 padding[1];
+};
+
+// recursive tree fork-join
+  static void *
+thread_do_fork_join_worker(void * const ptr)
+{
+  struct fork_join_info * const fji = (typeof(fji))ptr;
+  const u64 rank = fji->rank;
+  const u64 span0 = (rank ? (rank & -rank) : bits_p2_up(fji->tot)) >> 1;
+  if (span0) {
+    cpu_set_t * const set = process_cpu_set_alloc();
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+    for (u64 span = span0; span; span >>= 1) {
+      const u64 cr = rank + span;
+      if (cr >= fji->tot)
+        continue;
+      struct fork_join_info * const cfji = &(fji->all[cr]);
+      CPU_ZERO_S(process_cpu_set_size, set);
+      CPU_SET_S(cfji->core, process_cpu_set_size, set);
+      pthread_attr_setaffinity_np(&attr, process_cpu_set_size, set);
+      const int r = pthread_create(&(cfji->tid), &attr, thread_do_fork_join_worker, cfji);
+      if (r == 0) {
+        char thname[24];
+        sprintf(thname, "fj_%lu", cr);
+        pthread_setname_np(cfji->tid, thname);
+      } else {
+        cfji->tid = 0;
+      }
+    }
+    pthread_attr_destroy(&attr);
+    free(set);
+  }
+  void * const ret = fji->func(fji->argv);
+  for (u64 span = 1; span <= span0; span <<= 1) {
+    const u64 cr = rank + span;
+    if (cr >= fji->tot)
+      break;
+    struct fork_join_info * const cfji = &(fji->all[cr]);
+    if (cfji->tid)
+      pthread_join(cfji->tid, NULL);
+  }
+  return ret;
 }
 
   double
 thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * const argv)
 {
-  if (nr == 0) return 0.0;
-  const u64 ncpu = sysconf(_SC_NPROCESSORS_CONF);
-  int cores[ncpu];
-  size_t xsize = 0;
-  cpu_set_t * const set = __cpu_set_alloc(&xsize);
+  if (nr == 0)
+    return 0.0;
+  u64 cores[process_ncpu];
+  cpu_set_t * const set0 = process_cpu_set_alloc();
 
-  const bool force_all = (sched_getaffinity(0, xsize, set) != 0) ? true : false;
+  const bool force_all = (sched_getaffinity(0, process_cpu_set_size, set0) != 0) ? true : false;
   u64 j = 0;
-  for (u64 i = 0; i < ncpu; i++) {
-    if (force_all || CPU_ISSET_S((int)i, xsize, set)) {
+  for (u64 i = 0; i < process_ncpu; i++)
+    if (force_all || CPU_ISSET_S((int)i, process_cpu_set_size, set0))
       cores[j++] = i;
-    }
-  }
-  const u64 ncores = j;
 
+  const u64 ncores = j;
   const u64 nr_threads = nr ? nr : ncores;
-  const double t0 = time_sec();
-  if (nr_threads == 1lu) { // no fork for one thread
-    size_t xsize0 = 0;
-    const pthread_t self = pthread_self();
-    cpu_set_t * const set0 = __cpu_set_alloc(&xsize0);
-    pthread_getaffinity_np(self, xsize0, set0);
-    CPU_ZERO_S(xsize, set);
-    CPU_SET_S(cores[0], xsize, set);
-    pthread_setaffinity_np(self, xsize, set);
-    func(argv[0]);
-    pthread_setaffinity_np(self, xsize0, set0);
-    free(set0);
-  } else { // fork
-    pthread_t tids[nr_threads];
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-    char thname[32];
-    for (u64 i = 0; i < nr_threads; i++) {
-      CPU_ZERO_S(xsize, set);
-      CPU_SET_S(cores[i % ncores], xsize, set);
-      pthread_attr_setaffinity_np(&attr, xsize, set);
-      const int r = pthread_create(&(tids[i]), &attr, func, argv[i]);
-      if (r != 0) {
-        tids[i] = 0;
-      } else {
-        sprintf(thname, "fork_join_%"PRIu64, i);
-        pthread_setname_np(tids[i], thname);
-      }
-    }
-    pthread_attr_destroy(&attr);
-    for (u64 i = 0; i < nr_threads; i++) {
-      if (tids[i]) pthread_join(tids[i], NULL);
-    }
+
+  struct fork_join_info * const fjis = yalloc(sizeof(*fjis) * nr_threads);
+  for (u64 i = 0; i < nr_threads; i++) {
+    fjis[i].tot = nr_threads;
+    fjis[i].rank = i;
+    fjis[i].core = cores[i % ncores];
+    fjis[i].tid = 0;
+    fjis[i].func = func;
+    fjis[i].argv = argv[i];
+    fjis[i].all = fjis;
   }
-  const double dt = time_diff_sec(t0);
+
+  // master thread shares thread0's core
+  cpu_set_t * const set = process_cpu_set_alloc();
+  CPU_ZERO_S(process_cpu_set_size, set);
+  CPU_SET_S(fjis[0].core, process_cpu_set_size, set);
+  sched_setaffinity(0, process_cpu_set_size, set);
   free(set);
+
+  const double t0 = time_sec();
+  thread_do_fork_join_worker(&(fjis[0]));
+  const double dt = time_diff_sec(t0);
+
+  // restore original affinity
+  sched_setaffinity(0, process_cpu_set_size, set0);
+  free(set0);
+  free(fjis);
   return dt;
 }
 
@@ -407,10 +520,34 @@ thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg)
 {
   const u64 nthreads = nr ? nr : process_affinity_core_count();
   void * argv[nthreads];
-  for (u64 i = 0; i < nthreads; i++) {
+  for (u64 i = 0; i < nthreads; i++)
     argv[i] = arg;
-  }
+
   return thread_fork_join_private(nthreads, func, argv);
+}
+
+  inline int
+thread_create_at(const u64 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg)
+{
+  const u64 cpu_id = cpu % process_ncpu;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+  cpu_set_t * const set = process_cpu_set_alloc();
+
+  CPU_ZERO_S(process_cpu_set_size, set);
+  CPU_SET_S(cpu_id, process_cpu_set_size, set);
+  pthread_attr_setaffinity_np(&attr, process_cpu_set_size, set);
+  const int r = pthread_create(thread, &attr, start_routine, arg);
+  pthread_attr_destroy(&attr);
+  free(set);
+  return r;
+}
+
+  inline u64
+thread_get_core(void)
+{
+  return (u64)sched_getcpu();
 }
 // }}} process/thread
 
@@ -631,7 +768,7 @@ slab_destroy(struct slab * const slab)
 
 // }}} helpers
 
-// hash {{{
+// crc32c {{{
 #define CRC32C_SEED ((0xDEADBEEFu))
   static inline u32
 crc32c_inc_short_nz(const u8 * buf, size_t nr, u32 crc)
@@ -685,7 +822,7 @@ crc32c_inc(const u8 * buf, size_t nr, u32 crc)
   return crc32c_inc_short(buf, nr, crc);
 }
 
-  inline u32
+  static inline u32
 crc32c(const void * const ptr, size_t len)
 {
   return crc32c_inc((const u8 *)ptr, len, CRC32C_SEED);
@@ -697,7 +834,7 @@ crc32c_extend(const u32 lo)
   const u64 hi = (u64)(~lo);
   return (hi << 32) | ((u64)lo);
 }
-// }}} hash
+// }}} crc32c
 
 // qsbr {{{
 #define QSBR_STATES_NR ((22)) // 3*8-2
@@ -975,7 +1112,7 @@ kv_dup2_sbuf(const struct kv * const from, struct sbuf * const to)
   return new;
 }
 
-  inline struct kv *
+  struct kv *
 kv_alloc_malloc(const u64 size, void * const priv)
 {
   (void)priv;
@@ -1002,7 +1139,7 @@ kv_fullmatch(const struct kv * const kv1, const struct kv * const kv2)
   return (kv1->kvlen == kv2->kvlen) && (!memcmp(kv1, kv2, sizeof(*kv1) + kv1->klen + kv1->vlen));
 }
 
-  int
+  inline int
 kv_keycompare(const struct kv * const kv1, const struct kv * const kv2)
 {
   debug_assert(kv1);
@@ -1021,8 +1158,9 @@ kv_keycompare(const struct kv * const kv1, const struct kv * const kv2)
   }
 }
 
+// for qsort and bsearch
   static int
-__kv_compare_pp(const void * const p1, const void * const p2)
+kv_compare_pp(const void * const p1, const void * const p2)
 {
   const struct kv ** const pp1 = (typeof(pp1))p1;
   const struct kv ** const pp2 = (typeof(pp2))p2;
@@ -1032,7 +1170,7 @@ __kv_compare_pp(const void * const p1, const void * const p2)
   inline void
 kv_qsort(const struct kv ** const kvs, const size_t nr)
 {
-  qsort(kvs, nr, sizeof(kvs[0]), __kv_compare_pp);
+  qsort(kvs, nr, sizeof(kvs[0]), kv_compare_pp);
 }
 
   inline void *
@@ -1125,7 +1263,7 @@ kvmap_pkey(const u64 hash)
 }
 
   static const char *
-__kv_pattern(const char c)
+kv_pattern(const char c)
 {
   switch (c) {
     case 's': return "%c";
@@ -1145,13 +1283,13 @@ kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
   fprintf(out, "#%04lx #%016lx k[%2u] ", kvmap_pkey(kv->hash), kv->hash, klen);
   const u32 klim = klen < 1024u ? klen : 1024u;
 
-  const char * const kpat = __kv_pattern(cmd[0]);
+  const char * const kpat = kv_pattern(cmd[0]);
   for (u32 i = 0; i < klim; i++)
     fprintf(out, kpat, kv->kv[i]);
   if (klim < klen)
     fprintf(out, " ...");
 
-  const char * const vpat = __kv_pattern(cmd[1]);
+  const char * const vpat = kv_pattern(cmd[1]);
   if (vpat) { // may omit value
     const u32 vlen = kv->vlen;
     const u32 vlim = vlen < 1024u ? vlen : 1024u;
@@ -1182,7 +1320,7 @@ struct kvbucket {
 };
 
   static inline int
-__kvmap_entry_keycompare_vptr(const void * const p1, const void * const p2)
+kvmap_entry_keycompare_vptr(const void * const p1, const void * const p2)
 {
   const struct entry13 * const e1 = (typeof(e1))p1;
   const struct entry13 * const e2 = (typeof(e2))p2;
@@ -1192,9 +1330,9 @@ __kvmap_entry_keycompare_vptr(const void * const p1, const void * const p2)
 }
 
   static inline void
-__kvmap_entry_qsort(struct entry13 * const es, const size_t nr)
+kvmap_entry_qsort(struct entry13 * const es, const size_t nr)
 {
-  qsort(es, nr, sizeof(es[0]), __kvmap_entry_keycompare_vptr);
+  qsort(es, nr, sizeof(es[0]), kvmap_entry_keycompare_vptr);
 }
 
   static inline void
@@ -1211,7 +1349,7 @@ kvmap_put_entry(struct kvmap_mm * const mm, struct entry13 * const e, const stru
   }
 }
 
-static const struct kvmap_mm __kvmap_mm_default = {
+static const struct kvmap_mm kvmap_mm_default = {
   .af = kv_alloc_malloc,
   .ap = NULL,
   .rf = kv_retire_free,
@@ -1309,7 +1447,13 @@ struct wormhole_iter {
 };
 
 struct wormkref { // reference to a key
-  u64 hash;
+  union {
+    u64 hash;
+    struct {
+      u32 hashlo; // little endian
+      u32 hashhi;
+    };
+  };
   u32 plen; // prefix length; plen <= klen
   u32 klen; // the original klen
   const u8 * key;
@@ -1331,6 +1475,12 @@ wormhole_alloc_akey(const size_t klen)
   return malloc(sizeof(struct kv) + klen);
 }
 
+  static inline void
+wormhole_free_akey(struct kv * const akey)
+{
+  free(akey);
+}
+
   static inline struct kv *
 wormhole_alloc_mkey(const size_t klen)
 {
@@ -1340,6 +1490,12 @@ wormhole_alloc_mkey(const size_t klen)
   // ret->refcnt = 0; // this is safely omitted now
 }
 
+  static inline void
+wormhole_free_mkey(struct kv * const mkey)
+{
+  free(mkey);
+}
+
   static inline struct kv *
 wormhole_alloc_kv(struct wormhole * const map, const size_t klen, const size_t vlen)
 {
@@ -1347,7 +1503,7 @@ wormhole_alloc_kv(struct wormhole * const map, const size_t klen, const size_t v
   return map->mm.af(size, map->mm.ap);
 }
 
-  static struct wormleaf *
+  static inline struct wormleaf *
 wormhole_alloc_leaf(struct wormhole * const map, struct wormleaf * const prev,
     struct wormleaf * const next, struct kv * const anchor)
 {
@@ -1401,7 +1557,7 @@ wormhole_free_meta(struct slab * const slab, struct wormmeta * const meta)
   debug_assert(keyref->refcnt);
   keyref->refcnt--;
   if (keyref->refcnt == 0)
-    free(keyref);
+    wormhole_free_mkey(keyref);
   slab_free_unsafe(slab, meta);
 }
 // }}} alloc
@@ -1548,7 +1704,7 @@ wormhole_meta_bm_lt(const struct wormmeta * const meta, const u32 id0)
   static inline u16
 wormhole_hmap_skey(const u16 pkey)
 {
-  return pkey | (!pkey);
+  return pkey ? pkey : 1;
 }
 
   static inline u64
@@ -1674,7 +1830,7 @@ wormhole_hmap_get_kref1(const struct wormhmap * const hmap, const struct wormkre
   return wormhole_hmap_get_kref1_slot(hmap, midy, skey, ref, cid);
 }
 
-  static void
+  static inline void
 wormhole_hmap_squeeze(const struct wormhmap * const hmap)
 {
   const u64 nrs = hmap->mask + 1lu;
@@ -1707,7 +1863,7 @@ wormhole_hmap_squeeze(const struct wormhmap * const hmap)
   }
 }
 
-  static bool
+  static inline bool
 wormhole_hmap_expand(struct wormhmap * const hmap)
 {
   // sync expand
@@ -1905,7 +2061,7 @@ wormhole_create(const struct kvmap_mm * const mm)
   debug_assert(map);
   memset(map, 0, sizeof(*map));
   // mm
-  map->mm = mm ? (*mm) : __kvmap_mm_default;
+  map->mm = mm ? (*mm) : kvmap_mm_default;
 
   // hmap
   for (u64 i = 0; i < 2; i++) {
@@ -1938,7 +2094,7 @@ wormhole_create(const struct kvmap_mm * const mm)
 // jump {{{
 // search for a wormmeta in the hash table that has the longest prefix match of the requested key
 // the corresponding prefix is left at [pbuf] for callers to use at return
-  static struct wormmeta *
+  static inline struct wormmeta *
 wormhole_meta_up(const struct wormhmap * const hmap, struct wormkref * const ref)
 {
   // invariant: lo <= lp < hi
@@ -2041,7 +2197,7 @@ wormhole_meta_up(const struct wormhmap * const hmap, struct wormkref * const ref
 
 // pbuf: the current matched prefix of node
 // klen0: the real key's len
-  static struct wormleaf *
+  static inline struct wormleaf *
 wormhole_meta_down(const struct wormhmap * const hmap, const struct wormkref * const ref,
     const struct wormmeta * const meta)
 {
@@ -2072,7 +2228,7 @@ wormhole_meta_down(const struct wormhmap * const hmap, const struct wormkref * c
   return ret;
 }
 
-  static inline struct wormleaf *
+  static struct wormleaf *
 wormhole_jump_leaf(const struct wormhmap * const hmap, const struct kv * const key)
 {
   struct wormkref ref = {.hash = key->hash, .plen = key->klen, .klen = key->klen, .key = key->kv};
@@ -2224,14 +2380,14 @@ wormhole_getv(struct wormref * const ref, const struct kv * const key, struct sb
   return ret;
 }
 
-  void *
-wormhole_getp(struct wormref * const ref, const struct kv * const key)
+  u64
+wormhole_getu64(struct wormref * const ref, const struct kv * const key)
 {
   struct wormleaf * const leaf = wormhole_jump_leaf_read(ref, key);
   struct kv * const tmp = wormhole_leaf_get(leaf, key);
-  void * ret = NULL;
-  if (tmp) // found
-    ret = *(void **)(kv_vptr(tmp));
+  u64 ret = 0;
+  if (tmp && (tmp->vlen >= 8)) // found and has value
+    ret = *(const u64 *)(kv_vptr_c(tmp));
   rwlock_unlock_read(&(leaf->leaflock));
   return ret;
 }
@@ -2290,7 +2446,7 @@ wormhole_probe_unsafe(struct wormhole * const map, const struct kv * const key)
 // set {{{
 
 // leaf-only {{{
-  static void
+  static inline void
 wormhole_leaf_sort_m2(struct entry13 * const es, const u64 n1, const u64 n2)
 {
   if (n1 == 0 || n2 == 0)
@@ -2352,9 +2508,9 @@ wormhole_leaf_sync_sorted(struct wormleaf * const leaf)
     return;
 
   if ((n < 8) || (s < 4u) || (((s - 2u) << 2) < n)) { // too few sorted
-    __kvmap_entry_qsort(leaf->es, n);
+    kvmap_entry_qsort(leaf->es, n);
   } else { // worth a two-step sort
-    __kvmap_entry_qsort(&(leaf->es[s]), n - s);
+    kvmap_entry_qsort(&(leaf->es[s]), n - s);
     // merge-sort inplace
     wormhole_leaf_sort_m2(leaf->es, s, (n - s));
   }
@@ -2732,7 +2888,7 @@ wormhole_split_meta_hmap(struct wormhmap * const hmap, struct wormleaf * const l
       wormhole_prefix_inc_long(pbuf, i);
       done = wormhole_split_meta_one(hmap, pbuf, leaf, false);
       if (pbuf->refcnt == 0)
-        free(pbuf);
+        wormhole_free_mkey(pbuf);
     } while (!done);
   }
 
@@ -2790,7 +2946,7 @@ wormhole_split_meta_ref(struct wormref * const ref, struct wormleaf * const leaf
   wormhole_split_meta_hmap(hmap0, leaf2, mkey);
 
   if (mkey->refcnt == 0) // this is possible
-    free(mkey);
+    wormhole_free_mkey(mkey);
   rwlock_unlock_write(&(map->metalock));
 }
 
@@ -2846,7 +3002,7 @@ wormhole_split_meta_unsafe(struct wormhole * const map, struct wormleaf * const 
   wormhole_split_meta_hmap(hmap0->sibling, leaf2, mkey);
   wormhole_split_meta_hmap(hmap0, leaf2, mkey);
   if (mkey->refcnt == 0) // this is possible
-    free(mkey);
+    wormhole_free_mkey(mkey);
 }
 
   static bool
@@ -3019,7 +3175,8 @@ wormhole_merge_meta(struct wormhmap * const hmap, struct wormleaf * const leaf)
         wormhole_meta_bm_clear(parent, pbuf->kv[i - 1u]);
         parent = NULL;
       }
-      if (bitmin == WH_FO) break;
+      if (bitmin == WH_FO)
+        break;
     } else {
       if (meta->lmost == leaf)
         meta->lmost = next;
@@ -3033,7 +3190,7 @@ wormhole_merge_meta(struct wormhmap * const hmap, struct wormleaf * const leaf)
     i++;
     wormhole_prefix_inc_short(pbuf, i);
   }
-  free(pbuf);
+  free(pbuf); // malloc-ed above
 }
 
 // all locks (metalock + two leaflock) will be released before returning
@@ -3071,7 +3228,7 @@ wormhole_merge_ref(struct wormref * const ref, struct wormleaf * const leaf1,
 
   wormhole_merge_meta(hmap0, leaf2);
   // leaf2 is now safe to be removed
-  free(leaf2->anchor);
+  wormhole_free_akey(leaf2->anchor);
   slab_free(map->slab_leaf, leaf2);
   rwlock_unlock_write(&(map->metalock));
 }
@@ -3156,7 +3313,7 @@ wormhole_merge_unsafe(struct wormhole * const map, struct wormleaf * const leaf1
     leaf2->next->prev = leaf1;
   wormhole_merge_meta(hmap0->sibling, leaf2);
   wormhole_merge_meta(hmap0, leaf2);
-  free(leaf2->anchor);
+  wormhole_free_akey(leaf2->anchor);
   slab_free(map->slab_leaf, leaf2);
 }
 
@@ -3363,23 +3520,6 @@ wormhole_unref(struct wormref * const ref)
   return map;
 }
 
-  inline bool
-wormhole_locking(struct wormhole * const map, const bool locking)
-{
-  (void)map;
-  (void)locking;
-  return true;
-}
-
-// for whunsafe: returns false
-  inline bool
-wormhole_locking_unsafe(struct wormhole * const map, const bool locking)
-{
-  (void)map;
-  (void)locking;
-  return false;
-}
-
 // unsafe
   static void
 wormhole_clean1(struct wormhole * const map)
@@ -3405,7 +3545,7 @@ wormhole_clean1(struct wormhole * const map)
   struct wormleaf * leaf = map->leaf0;
   while (leaf) {
     struct wormleaf * const next = leaf->next;
-    free(leaf->anchor);
+    wormhole_free_akey(leaf->anchor);
     for (u64 i = 0; i < WH_KPN; i++)
       kvmap_put_entry(&(map->mm), &(leaf->eh[i]), NULL);
     slab_free(map->slab_leaf, leaf);

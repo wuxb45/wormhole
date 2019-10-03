@@ -8,23 +8,19 @@
 #include <stdatomic.h>
 #include "wh.h"
 
-  static inline u64
-xorshift(const u64 seed)
-{
-  u64 x = seed ? seed : rdtsc();
-  x ^= x >> 12; // a
-  x ^= x << 25; // b
-  x ^= x >> 27; // c
-  return x * 2685821657736338717lu;
-}
+static __thread __uint128_t rseed_u128 = 7;
 
-static __thread u64 __random_seed_u64 = 0;
-
-  static inline u64
+  inline u64
 random_u64(void)
 {
-  __random_seed_u64 = xorshift(__random_seed_u64);
-  return __random_seed_u64;
+  rseed_u128 *= 0xda942042e4dd58b5lu;
+  return rseed_u128 >> 64;
+}
+
+  inline void
+srandom_u64(const u64 seed)
+{
+  rseed_u128 = (seed << 1) | 1;
 }
 
 atomic_uint_least64_t __seqno = 0;
@@ -37,6 +33,7 @@ u64 __endtime = 0;
   static void *
 kv_load_worker(struct wormhole * const wh)
 {
+  srandom_u64(rdtsc() * rdtsc());
   struct wormref * const ref = wormhole_ref(wh);
   const u64 seq = atomic_fetch_add(&__seqno, 1);
   const u64 n0 = __nkeys / __nth * seq;

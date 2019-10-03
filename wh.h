@@ -141,29 +141,7 @@ thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg);
 // mm {{{
   extern void *
 yalloc(const u64 size);
-
-/* hugepages */
-// force posix allocators: -DVALGRIND_MEMCHECK
-  extern void *
-pages_alloc_4kb(const size_t nr_4kb);
-
-  extern void *
-pages_alloc_2mb(const size_t nr_2mb);
-
-  extern void *
-pages_alloc_1gb(const size_t nr_1gb);
-
-  extern void *
-pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out);
-
-  extern void
-pages_unmap(void * const ptr, const size_t size);
 // }}} mm
-
-// cpucache {{{
-  extern void
-cpu_cfence(void);
-// }}} cpucache
 
 // qsbr {{{
 struct qsbr;
@@ -186,11 +164,6 @@ qsbr_wait(struct qsbr * const q, const u64 target);
   extern void
 qsbr_destroy(struct qsbr * const q);
 // }}} qsbr
-
-// hash {{{
-  extern u32
-crc32c(const void * const ptr, const size_t size);
-// }}} hash
 
 // kv {{{
 /*
@@ -342,8 +315,8 @@ wormhole_get(struct wormref * const ref, const struct kv * const key, struct kv 
   extern struct sbuf *
 wormhole_getv(struct wormref * const ref, const struct kv * const key, struct sbuf * const out);
 
-  extern void *
-wormhole_getp(struct wormref * const ref, const struct kv * const key);
+  extern u64
+wormhole_getu64(struct wormref * const ref, const struct kv * const key);
 
   extern bool
 wormhole_probe(struct wormref * const ref, const struct kv * const key);
@@ -409,7 +382,6 @@ wormhole_iter_next_unsafe(struct wormhole_iter * const iter, struct kv * const o
 
   extern void
 wormhole_iter_destroy_unsafe(struct wormhole_iter * const iter);
-
 // }}} wormhole
 
 #ifdef __cplusplus

@@ -51,7 +51,7 @@ In a more general case, `kv_update_hash` can be used to update the key's hash.
 ## The Wormhole API
 
 The Wormhole functions are listed near the bottom of wh.h (see the wormhole\_\* functions).
-`demo1.c` and `concbench.c` are good examples of using the Wormhole.
+`demo1.c` and `concbench.c` privide examples of how to use the Wormhole index.
 
 ### The thread-safe API
 The default index operations (GET, SET, DEL, PROBE, and SCAN (wormhole\_iter\_\* functions)) are *thread safe*.
@@ -101,7 +101,7 @@ Wormhole uses hugepages when available. To reserve some hugepages in Linux (1000
 
     # echo 10000 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 
-### Performance
+## Performance
 Some benchmarking results with some real-world datasets: See [this](https://github.com/wuxb45/wormhole/issues/5) page for more information.
 
-![Concurrent GET](https://user-images.githubusercontent.com/564235/65822621-123dc100-e20d-11e9-83d5-b423d0582b0c.png)
+![Concurrent GET](https://user-images.githubusercontent.com/564235/65991356-d300b180-e452-11e9-9103-f0f7e8dae20b.png)

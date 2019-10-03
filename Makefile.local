@@ -22,3 +22,8 @@ EXTERNDEP +=
 
 FLG +=
 LIB += rt m
+
+# libwh is part of the target
+bin : libwh.so
+libwh.so : wh.c wh.h
+	$(CCC) $(FLG) -shared -fPIC -o $@ $<
