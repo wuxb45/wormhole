@@ -11,17 +11,17 @@ Please read this README and the sample programs before using Wormhole in your co
 
 The project was developed & tested on a 64-bit Linux.
 Some Linux-specific APIs are used (e.g., `mmap`) so porting to MacOS/Windows may take some effort.
-Clang is the default compiler. It can be changed to gcc in Makefile.common (CCC=gcc make).
+Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ CCC=gcc make`).
 
 To build:
 
     $ make
 
-Alternatively, you may use `O=0g` to enable debug info and disable optimization:
+Alternatively, you may use `O=0g` to enable debug info and disable optimizations:
 
     $ O=0g make
 
-Read Makefile.common for options on optimization and debugging levels (O=).
+Read `Makefile` for options on optimization and debugging levels (O=).
 
 To run the demo code:
 
@@ -30,9 +30,12 @@ To run the demo code:
 Each line of the input becomes a key in the index. Duplicates are allowed from the input. You may use "wh.c" for a test drive.
 
 `concbench.out` is an example benchmarking tool of only 150 LoC. See the helper messages for more details.
-It generates keys based on a word list (words.txt). See the key pattern used in `sprintf` in `concbench.c`.
+It generates six-word keys based on a word list (words.txt). See `sprintf` in `concbench.c`.
 
     $ wget https://github.com/dwyl/english-words/raw/master/words.txt
+    
+    $ ./concbench.out words.txt 10000000 4
+    
     $ numactl -N 0 ./concbench.out words.txt 10000000 4
 
 # The code
@@ -51,7 +54,7 @@ In a more general case, `kv_update_hash` can be used to update the key's hash.
 ## The Wormhole API
 
 The Wormhole functions are listed near the bottom of wh.h (see the wormhole\_\* functions).
-`demo1.c` and `concbench.c` privide examples of how to use the Wormhole index.
+`demo1.c` and `concbench.c` are examples of how to use the Wormhole index.
 
 ### The thread-safe API
 The default index operations (GET, SET, DEL, PROBE, and SCAN (wormhole\_iter\_\* functions)) are *thread safe*.
@@ -68,9 +71,9 @@ Each thread needs to hold a reference of the index (_wormref_) to perform the in
 
 Wormhole internally uses QSBR RCU to synchronize readers/writers so every holder of a reference (`ref`)
 needs to actively perform index operations.
-An ref-holder, if not actively performing index operations, may block writer threads (because of not periodically announcing its quiescent state).
+An ref-holder, if not actively performing index operations, may block some writer threads performing split/merge operations. (because of not periodically announcing its quiescent state).
 If a ref-holder is about to become inactive (regarding to performing Wormhole operations),
-it is recommended that the holder temporarily releases the `ref` before entering the inactive status (such as calling `sleep(10)`), and obtain a new `ref` after that.
+it is recommended that the holder temporarily releases the `ref` before entering the inactive status (such as calling `sleep(10)`), and obtain a new `ref` after that sleep(). Repeatedly calling `wormhole_ref()` and `wormhole_unref()` can be expensive as they acquire locks internally.
 
 ### The thread-unsafe API
 A set of *thread-unsafe* functions are also provided. See the functions with "\_unsafe" suffix.
@@ -82,6 +85,11 @@ The thread-unsafe functions don't use the reference (_wormref_). Simply feed it 
     }
     // other unsafe operations
     wormhole_destroy(index);
+
+### light-weight GET functions
+`wormhole_get()` returns a full copy of the key-value pair to the user-provided buffer (or malloc-ed if `out == 0`). This can be suboptimal if dealing with long keys and short values. To minimize copying, the `wormhole_getv` and `wormhole_getu64` functions avoid copying the the key.
+
+`wormhole_getu64` returns 0 if the key if not found or the value's length is shorter than 8 bytes. This can be useful if the application logic treats "`value == 0`" as equivalent to "not found".
 
 ## Memory management
 
