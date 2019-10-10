@@ -8,7 +8,7 @@
 # X.out : xyz.h xyz.c # for extra dependences that are to be compiled/linked.
 
 # X => X.out
-TARGETS += demo1 concbench
+TARGETS += demo1 concbench stresstest
 # X => X.c only
 SOURCES +=
 # X => X.c X.h
