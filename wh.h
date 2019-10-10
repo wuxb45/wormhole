@@ -14,17 +14,6 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
-// POSIX headers
-#include <unistd.h>
-#include <pthread.h>
-
-// Linux headers
-#include <sys/mman.h>
-#include <sys/resource.h>
 // }}} includes
 
 // types {{{
@@ -33,64 +22,6 @@ typedef uint_least16_t          u16;
 typedef uint_least32_t          u32;
 typedef uint_least64_t          u64;
 // }}} types
-
-// locks {{{
-typedef struct __spinlock {
-  union {
-    u16 var;
-    u64 padding;
-  };
-} spinlock;
-
-  extern void
-spinlock_init(spinlock * const lock);
-
-  extern bool
-spinlock_trylock_nr(spinlock * const lock, u64 nr);
-
-  extern void
-spinlock_lock(spinlock * const lock);
-
-  extern void
-spinlock_unlock(spinlock * const lock);
-
-typedef struct __rwlock {
-  union {
-    u16 var;
-    u64 padding;
-  };
-} rwlock;
-
-  extern void
-rwlock_init(rwlock * const lock);
-
-  extern bool
-rwlock_trylock_read(rwlock * const lock);
-
-  extern bool
-rwlock_trylock_read_nr(rwlock * const lock, u64 nr);
-
-  extern void
-rwlock_lock_read(rwlock * const lock);
-
-  extern void
-rwlock_unlock_read(rwlock * const lock);
-
-  extern bool
-rwlock_trylock_write(rwlock * const lock);
-
-  extern bool
-rwlock_trylock_write_nr(rwlock * const lock, u64 nr);
-
-  extern void
-rwlock_lock_write(rwlock * const lock);
-
-  extern void
-rwlock_unlock_write(rwlock * const lock);
-
-  extern void
-rwlock_write_to_read(rwlock * const lock);
-// }}} locks
 
 // timing {{{
   extern u64
@@ -106,27 +37,6 @@ time_sec(void);
 time_diff_sec(const double last);
 // }}} timing
 
-// debug {{{
-  extern void
-debug_break(void);
-
-  extern void
-debug_backtrace(void);
-
-  extern void
-debug_wait_gdb(void);
-
-#ifndef NDEBUG
-  extern void
-debug_assert(const bool v);
-#else
-#define debug_assert(expr) ((void)0)
-#endif
-
-  extern void
-debug_die(void);
-// }}} debug
-
 // process/thread {{{
   extern u64
 process_affinity_core_count(void);
@@ -137,33 +47,6 @@ thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * co
   extern double
 thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg);
 // }}} process/thread
-
-// mm {{{
-  extern void *
-yalloc(const u64 size);
-// }}} mm
-
-// qsbr {{{
-struct qsbr;
-
-  extern void
-qsbr_init(struct qsbr * const q);
-
-  extern struct qsbr *
-qsbr_create(void);
-
-  extern bool
-qsbr_register(struct qsbr * const q, volatile u64 * const ptr);
-
-  extern void
-qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr);
-
-  extern void
-qsbr_wait(struct qsbr * const q, const u64 target);
-
-  extern void
-qsbr_destroy(struct qsbr * const q);
-// }}} qsbr
 
 // kv {{{
 /*
@@ -278,12 +161,6 @@ kv_vptr_c(const struct kv * const kv);
 
   extern const void *
 kv_kptr_c(const struct kv * const kv);
-
-  extern u32
-kv_key_lcp(const struct kv * const key1, const struct kv * const key2);
-
-  extern bool
-kv_key_is_prefix(const struct kv * const p, const struct kv * const key);
 
   extern void
 kv_print(const struct kv * const kv, const char * const cmd, FILE * const out);

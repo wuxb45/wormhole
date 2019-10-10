@@ -15,14 +15,19 @@
 #include <errno.h>
 #include <x86intrin.h>
 #include <assert.h>
+// POSIX headers
+#include <unistd.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+// Linux headers
+#include <sys/mman.h>
+#include <sys/resource.h>
 // }}} headers
 
 // {{{ helpers
-
-// ansi colors {{{
-#define ANSI_FR  "\x1b[31m"
-#define ANSI_X   "\x1b[0m"
-// }}} ansi colors
 
 // atomic {{{
 /* C11 atomic types */
@@ -30,8 +35,147 @@ typedef atomic_uint_least16_t   au16;
 typedef atomic_uint_least64_t   au64;
 // }}} atomic
 
+// locks {{{
+typedef struct __spinlock {
+  union {
+    au16 var;
+    u64 padding;
+  };
+} spinlock;
+
+typedef struct __rwlock {
+  union {
+    au16 var;
+    u64 padding;
+  };
+} rwlock;
+// }}} locks
+
+// debug {{{
+#ifndef NDEBUG
+  extern void
+debug_assert(const bool v);
+#else
+#define debug_assert(expr) ((void)0)
+#endif
+// }}} debug
+
+// ansi colors {{{
+#define ANSI_FR  "\x1b[31m"
+#define ANSI_X   "\x1b[0m"
+// }}} ansi colors
+
+// mm {{{
+#define PGSZ ((UINT64_C(4096)))
+// alloc cache-line aligned address
+  static void *
+yalloc(const u64 size)
+{
+  void * p;
+  const int r = posix_memalign(&p, 64, size);
+  if (r == 0) return p;
+  else return NULL;
+}
+
+  static inline void
+pages_unmap(void * const ptr, const size_t size)
+{
+#ifndef HEAPCHECKING
+  munmap(ptr, size);
+#else
+  (void)size;
+  free(ptr);
+#endif
+}
+
+  static inline void *
+__pages_alloc(const size_t size, const int flags)
+{
+  // vi /etc/security/limits.conf
+  // * - memlock unlimited
+  void * const p = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+  if (p == MAP_FAILED) {
+    return NULL;
+  }
+  mlock(p, size); // ignore if cannot pin memory. see memlock in /etc/security/limits.conf
+  return p;
+}
+
+  static inline void *
+pages_alloc_1gb(const size_t nr_1gb)
+{
+  const u64 sz = nr_1gb << 30;
+#ifndef HEAPCHECKING
+  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (30 << MAP_HUGE_SHIFT));
+#else
+  void * const p = xalloc(UINT64_C(1) << 30, sz);
+  if (p) memset(p, 0, sz);
+  return p;
+#endif
+}
+
+  static inline void *
+pages_alloc_2mb(const size_t nr_2mb)
+{
+  const u64 sz = nr_2mb << 21;
+#ifndef HEAPCHECKING
+  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (21 << MAP_HUGE_SHIFT));
+#else
+  void * const p = xalloc(UINT64_C(1) << 21, sz);
+  if (p) memset(p, 0, sz);
+  return p;
+#endif
+}
+
+  static inline void *
+pages_alloc_4kb(const size_t nr_4kb)
+{
+  const size_t sz = nr_4kb << 12;
+#ifndef HEAPCHECKING
+  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS);
+#else
+  void * const p = xalloc(UINT64_C(1) << 12, sz);
+  if (p) memset(p, 0, sz);
+  return p;
+#endif
+}
+
+  void *
+pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
+{
+  if (try_1gb) {
+    const size_t nr_1gb = (size + ((UINT64_C(1) << 30) - UINT64_C(1))) >> 30;
+    // 1gb super huge page: waste < 1/16 or 6.25%
+    if (((nr_1gb << 30) - size) < (size >> 4)) {
+      void * const p1 = pages_alloc_1gb(nr_1gb);
+      if (p1) {
+        *size_out = nr_1gb << 30;
+        return p1;
+      }
+    }
+  }
+
+  // 2mb huge page: at least 1MB
+  if (size >= (UINT64_C(1) << 20)) {
+    const size_t nr_2mb = (size + ((UINT64_C(1) << 21) - UINT64_C(1))) >> 21;
+    void * const p2 = pages_alloc_2mb(nr_2mb);
+    if (p2) {
+      *size_out = nr_2mb << 21;
+      return p2;
+    }
+  }
+
+  const size_t nr_4kb = (size + ((UINT64_C(1) << 12) - UINT64_C(1))) >> 12;
+  void * const p3 = pages_alloc_4kb(nr_4kb);
+  if (p3) {
+    *size_out = nr_4kb << 12;
+  }
+  return p3;
+}
+// }}} mm
+
 // bits {{{
-  inline u64
+  static inline u64
 bits_p2_up(const u64 v)
 {
   // clz(0) is undefined
@@ -47,7 +191,7 @@ bits_round_up(const u64 v, const u8 power)
 
 // cpucache {{{
 // compiler fence
-  inline void
+  static inline void
 cpu_cfence(void)
 {
   atomic_thread_fence(memory_order_acq_rel);
@@ -68,13 +212,13 @@ cpu_prefetchr(const void * const ptr, const int hint)
 // }}} cpucache
 
 // locking {{{
-  inline void
+  static inline void
 spinlock_init(spinlock * const lock)
 {
-  lock->var = 0u;
+  atomic_store(&lock->var, 0);
 }
 
-  inline bool
+  static inline bool
 spinlock_trylock_nr(spinlock * const lock, u64 nr)
 {
   au16 * const pvar = (typeof(pvar))&(lock->var);
@@ -90,7 +234,7 @@ spinlock_trylock_nr(spinlock * const lock, u64 nr)
   return false;
 }
 
-  inline void
+  static inline void
 spinlock_lock(spinlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))&(lock->var);
@@ -99,27 +243,27 @@ spinlock_lock(spinlock * const lock)
       return;
     do {
       _mm_pause();
-    } while (lock->var);
+    } while (atomic_load(pvar));
   } while (true);
 }
 
-  inline void
+  static inline void
 spinlock_unlock(spinlock * const lock)
 {
-  lock->var = 0u;
+  atomic_store(&lock->var, 0);
 }
 
 #define RWLOCK_WSHIFT ((15))
 #define RWLOCK_WBIT ((1u << RWLOCK_WSHIFT))
 
-  inline void
+  static inline void
 rwlock_init(rwlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))(&(lock->var));
   atomic_store(pvar, 0);
 }
 
-  inline bool
+  static inline bool
 rwlock_trylock_read(rwlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))(&(lock->var));
@@ -132,31 +276,31 @@ rwlock_trylock_read(rwlock * const lock)
 }
 
 // actually nr + 1
-  inline bool
+  static inline bool
 rwlock_trylock_read_nr(rwlock * const lock, u64 nr)
 {
   if (rwlock_trylock_read(lock))
     return true;
   do {
-    if (((lock->var >> RWLOCK_WSHIFT) == 0u) && rwlock_trylock_read(lock))
+    if (((atomic_load(&lock->var) >> RWLOCK_WSHIFT) == 0u) && rwlock_trylock_read(lock))
       return true;
     _mm_pause();
   } while (nr--);
   return false;
 }
 
-  inline void
+  static inline void
 rwlock_unlock_read(rwlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))(&(lock->var));
   atomic_fetch_sub(pvar, 1u);
 }
 
-  inline bool
+  static inline bool
 rwlock_trylock_write(rwlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))(&(lock->var));
-  u16 v0 = *pvar;
+  u16 v0 = atomic_load(pvar);
   if (v0 == 0u) {
     if (atomic_compare_exchange_weak(pvar, &v0, RWLOCK_WBIT))
       return true;
@@ -165,7 +309,7 @@ rwlock_trylock_write(rwlock * const lock)
 }
 
 // actually nr + 1
-  inline bool
+  static inline bool
 rwlock_trylock_write_nr(rwlock * const lock, u64 nr)
 {
   do {
@@ -176,27 +320,27 @@ rwlock_trylock_write_nr(rwlock * const lock, u64 nr)
   return false;
 }
 
-  inline void
+  static inline void
 rwlock_lock_write(rwlock * const lock)
 {
   while (rwlock_trylock_write(lock) == false)
-    while (lock->var)
+    while (atomic_load(&lock->var))
       _mm_pause();
 }
 
-  inline void
+  static inline void
 rwlock_unlock_write(rwlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))(&(lock->var));
   atomic_fetch_sub(pvar, RWLOCK_WBIT);
 }
 
-  inline void
+  static inline void
 rwlock_write_to_read(rwlock * const lock)
 {
   au16 * const pvar = (typeof(pvar))(&(lock->var));
   do {
-    u16 v0 = *pvar;
+    u16 v0 = atomic_load(pvar);
     debug_assert(v0 & RWLOCK_WBIT);
     debug_assert(((v0 + 1u - RWLOCK_WBIT) & RWLOCK_WBIT) == 0u); // corner case
     // +R -W
@@ -237,13 +381,7 @@ time_diff_sec(const double last)
 // }}} timing
 
 // debug {{{
-  void
-debug_break(void)
-{
-  usleep(100);
-}
-
-  void
+  static void
 debug_backtrace(void)
 {
   void *array[100];
@@ -253,7 +391,7 @@ debug_backtrace(void)
   backtrace_symbols_fd(array + 1, size, 2);
 }
 
-  void
+  static void
 debug_wait_gdb(void)
 {
   debug_backtrace();
@@ -292,7 +430,7 @@ debug_assert(const bool v)
 #endif
 
 __attribute__((noreturn))
-  inline void
+  static void
 debug_die(void)
 {
   debug_wait_gdb();
@@ -367,7 +505,7 @@ process_affinity_core_count(void)
     return process_ncpu;
   }
 
-  const int nr = CPU_COUNT_S(process_cpu_set_size, set);
+  const u64 nr = (u64)CPU_COUNT_S(process_cpu_set_size, set);
   free(set);
   return nr ? nr : process_ncpu;
 }
@@ -515,7 +653,7 @@ thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * co
   return dt;
 }
 
-  inline double
+  double
 thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg)
 {
   const u64 nthreads = nr ? nr : process_affinity_core_count();
@@ -525,140 +663,7 @@ thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg)
 
   return thread_fork_join_private(nthreads, func, argv);
 }
-
-  inline int
-thread_create_at(const u64 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg)
-{
-  const u64 cpu_id = cpu % process_ncpu;
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-  cpu_set_t * const set = process_cpu_set_alloc();
-
-  CPU_ZERO_S(process_cpu_set_size, set);
-  CPU_SET_S(cpu_id, process_cpu_set_size, set);
-  pthread_attr_setaffinity_np(&attr, process_cpu_set_size, set);
-  const int r = pthread_create(thread, &attr, start_routine, arg);
-  pthread_attr_destroy(&attr);
-  free(set);
-  return r;
-}
-
-  inline u64
-thread_get_core(void)
-{
-  return (u64)sched_getcpu();
-}
 // }}} process/thread
-
-// mm {{{
-#define PGSZ ((UINT64_C(4096)))
-// alloc cache-line aligned address
-  inline void *
-yalloc(const u64 size)
-{
-  void * p;
-  const int r = posix_memalign(&p, 64, size);
-  if (r == 0) return p;
-  else return NULL;
-}
-
-  inline void
-pages_unmap(void * const ptr, const size_t size)
-{
-#ifndef HEAPCHECKING
-  munmap(ptr, size);
-#else
-  (void)size;
-  free(ptr);
-#endif
-}
-
-  static inline void *
-__pages_alloc(const size_t size, const int flags)
-{
-  // vi /etc/security/limits.conf
-  // * - memlock unlimited
-  void * const p = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-  if (p == MAP_FAILED) {
-    return NULL;
-  }
-  mlock(p, size); // ignore if cannot pin memory. see memlock in /etc/security/limits.conf
-  return p;
-}
-
-  inline void *
-pages_alloc_1gb(const size_t nr_1gb)
-{
-  const u64 sz = nr_1gb << 30;
-#ifndef HEAPCHECKING
-  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (30 << MAP_HUGE_SHIFT));
-#else
-  void * const p = xalloc(UINT64_C(1) << 30, sz);
-  if (p) memset(p, 0, sz);
-  return p;
-#endif
-}
-
-  inline void *
-pages_alloc_2mb(const size_t nr_2mb)
-{
-  const u64 sz = nr_2mb << 21;
-#ifndef HEAPCHECKING
-  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (21 << MAP_HUGE_SHIFT));
-#else
-  void * const p = xalloc(UINT64_C(1) << 21, sz);
-  if (p) memset(p, 0, sz);
-  return p;
-#endif
-}
-
-  inline void *
-pages_alloc_4kb(const size_t nr_4kb)
-{
-  const size_t sz = nr_4kb << 12;
-#ifndef HEAPCHECKING
-  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS);
-#else
-  void * const p = xalloc(UINT64_C(1) << 12, sz);
-  if (p) memset(p, 0, sz);
-  return p;
-#endif
-}
-
-  void *
-pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
-{
-  if (try_1gb) {
-    const size_t nr_1gb = (size + ((UINT64_C(1) << 30) - UINT64_C(1))) >> 30;
-    // 1gb super huge page: waste < 1/16 or 6.25%
-    if (((nr_1gb << 30) - size) < (size >> 4)) {
-      void * const p1 = pages_alloc_1gb(nr_1gb);
-      if (p1) {
-        *size_out = nr_1gb << 30;
-        return p1;
-      }
-    }
-  }
-
-  // 2mb huge page: at least 1MB
-  if (size >= (UINT64_C(1) << 20)) {
-    const size_t nr_2mb = (size + ((UINT64_C(1) << 21) - UINT64_C(1))) >> 21;
-    void * const p2 = pages_alloc_2mb(nr_2mb);
-    if (p2) {
-      *size_out = nr_2mb << 21;
-      return p2;
-    }
-  }
-
-  const size_t nr_4kb = (size + ((UINT64_C(1) << 12) - UINT64_C(1))) >> 12;
-  void * const p3 = pages_alloc_4kb(nr_4kb);
-  if (p3) {
-    *size_out = nr_4kb << 12;
-  }
-  return p3;
-}
-// }}} mm
 
 // slab {{{
 struct slab_object {
@@ -693,7 +698,7 @@ slab_expand(struct slab * const slab)
   }
 }
 
-  struct slab *
+  static struct slab *
 slab_create(const u64 obj_size, const u64 blk_size)
 {
   // obj must be 8-byte aligned
@@ -753,7 +758,7 @@ slab_free(struct slab * const slab, void * const ptr)
   spinlock_unlock(&(slab->lock));
 }
 
-  void
+  static void
 slab_destroy(struct slab * const slab)
 {
   struct slab_object * iter = slab->blk_head;
@@ -853,7 +858,7 @@ struct qsbr { // 1 + (3 * 32) = 97 lines
   volatile u64 * wait_ptrs[QSBR_CAPACITY];
 };
 
-  inline struct qsbr *
+  static struct qsbr *
 qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
@@ -869,7 +874,7 @@ qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
   return &(q->shards[sid]);
 }
 
-  inline bool
+  static bool
 qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
 {
   if (ptr == NULL)
@@ -889,7 +894,7 @@ qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
   return false;
 }
 
-  inline void
+  static void
 qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 {
   if (ptr == NULL)
@@ -918,7 +923,7 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 }
 
 // waiters needs external synchronization
-  inline void
+  static void
 qsbr_wait(struct qsbr * const q, const u64 target)
 {
   q->target = target;
@@ -954,7 +959,7 @@ qsbr_wait(struct qsbr * const q, const u64 target)
     spinlock_unlock(&(q->shards[i].lock));
 }
 
-  inline void
+  static void
 qsbr_destroy(struct qsbr * const q)
 {
   free(q);
@@ -1198,7 +1203,7 @@ kv_kptr_c(const struct kv * const kv)
 }
 
 // return the length of longest common prefix of the two keys
-  inline u32
+  static inline u32
 kv_key_lcp(const struct kv * const key1, const struct kv * const key2)
 {
   const u32 max = (key1->klen < key2->klen) ? key1->klen : key2->klen;
@@ -1237,7 +1242,7 @@ kv_key_lcp(const struct kv * const key1, const struct kv * const key2)
 }
 
 // return true if p is a prefix of key
-  inline bool
+  static inline bool
 kv_key_is_prefix(const struct kv * const p, const struct kv * const key)
 {
   return ((p->klen <= key->klen) && (kv_key_lcp(p, key) == p->klen)) ? true : false;

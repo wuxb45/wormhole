@@ -4,20 +4,24 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #define _GNU_SOURCE
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <immintrin.h>
 #include <stdatomic.h>
 #include "wh.h"
 
 static __thread __uint128_t rseed_u128 = 7;
 
-  inline u64
+  static inline u64
 random_u64(void)
 {
   rseed_u128 *= 0xda942042e4dd58b5lu;
   return rseed_u128 >> 64;
 }
 
-  inline void
+  static inline void
 srandom_u64(const u64 seed)
 {
   rseed_u128 = (seed << 1) | 1;
@@ -136,9 +140,9 @@ main(int argc, char ** argv)
 
   const u64 nth = strtoull(argv[3], NULL, 10);
   printf("probe with %lu threads. each round takes 10 seconds\n", nth);
-  for (u64 i = 0; i < 5; i++) {
+  for (u64 i = 0; i < 3; i++) {
     __tot = 0;
-    __endtime = time_nsec() + 1e10; // 10 sec
+    __endtime = time_nsec() + 3e9; // 10 sec
     const double dt = thread_fork_join(nth, (void *)kv_probe_worker, (void *)wh);
     const double mops = ((double)__tot) / dt * 1e-6;
     printf("probe x%lu %.2lf mops\n", nth, mops);

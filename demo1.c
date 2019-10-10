@@ -4,6 +4,8 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "wh.h"
 
 char * __buf = NULL;
