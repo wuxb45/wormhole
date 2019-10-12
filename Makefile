@@ -43,7 +43,7 @@ LIB += tcmalloc
 else ifeq ($O,warn) # more warning
 OPT ?= -g3 -O3 -Wvla -Wformat=2
 else # 0g
-OPT ?= -g3 -O0
+OPT ?= -g3 -DNDEBUG -O3 -flto
 endif
 
 NBI += memcpy memmove memcmp

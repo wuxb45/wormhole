@@ -151,7 +151,7 @@ main(int argc, char ** argv)
   // gen keys and load (4)
   struct wormhole * const wh = wormhole_create(NULL);
   nth = 4;
-  const double dtl = thread_fork_join(4, (void *)kv_load_worker, false, (void *)wh);
+  const double dtl = thread_fork_join(nth, (void *)kv_load_worker, false, (void *)wh);
   printf("gen and load x4 %.2lf mops\n", ((double)nkeys) / dtl * 1e-6);
 
   // free words & buf
