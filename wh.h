@@ -37,15 +37,22 @@ time_sec(void);
 time_diff_sec(const double last);
 // }}} timing
 
+// random {{{
+  extern u64
+random_u64(void);
+
+  extern void
+srandom_u64(const u64 seed);
+// }}} random
+
 // process/thread {{{
   extern u64
 process_affinity_core_count(void);
 
+// if args == true, argx is void **
+// if args == false, argx is void *
   extern double
-thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * const argv);
-
-  extern double
-thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg);
+thread_fork_join(const u64 nr, void *(*func) (void *), const bool args, void * const argx);
 // }}} process/thread
 
 // kv {{{
@@ -69,7 +76,13 @@ struct kv {
       };
     };
   };
-  u64 hash; // hashvalue of the key
+  union {
+    u64 hash; // hashvalue of the key
+    struct {
+      u32 hashlo; // little endian
+      u32 hashhi;
+    };
+  };
   u8 kv[];  // len(kv) == klen + vlen
 } __attribute__((packed));
 

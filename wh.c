@@ -32,24 +32,9 @@
 // atomic {{{
 /* C11 atomic types */
 typedef atomic_uint_least16_t   au16;
+typedef atomic_uint_least32_t   au32;
 typedef atomic_uint_least64_t   au64;
 // }}} atomic
-
-// locks {{{
-typedef struct __spinlock {
-  union {
-    au16 var;
-    u64 padding;
-  };
-} spinlock;
-
-typedef struct __rwlock {
-  union {
-    au16 var;
-    u64 padding;
-  };
-} rwlock;
-// }}} locks
 
 // debug {{{
 #ifndef NDEBUG
@@ -59,6 +44,37 @@ debug_assert(const bool v);
 #define debug_assert(expr) ((void)0)
 #endif
 // }}} debug
+
+// random {{{
+// Lehmer's generator is 2x faster than xorshift
+/**
+* D. H. Lehmer, Mathematical methods in large-scale computing units.
+* Proceedings of a Second Symposium on Large Scale Digital Calculating
+* Machinery;
+* Annals of the Computation Laboratory, Harvard Univ. 26 (1951), pp. 141-146.
+*
+* P L'Ecuyer,  Tables of linear congruential generators of different sizes and
+* good lattice structure. Mathematics of Computation of the American
+* Mathematical
+* Society 68.225 (1999): 249-260.
+*/
+static __thread union {__uint128_t v128; u64 v64[2]; } rseed_u128 = {.v64[0] = 4294967291};
+
+  inline u64
+random_u64(void)
+{
+  const u64 r = rseed_u128.v64[1];
+  rseed_u128.v128 *= 0xda942042e4dd58b5lu;
+  return r;
+}
+
+  inline void
+srandom_u64(const u64 seed)
+{
+  rseed_u128.v128 = (((__uint128_t)(~seed)) << 64) | (seed | 1);
+  (void)random_u64();
+}
+// }}} random
 
 // ansi colors {{{
 #define ANSI_FR  "\x1b[31m"
@@ -212,22 +228,30 @@ cpu_prefetchr(const void * const ptr, const int hint)
 // }}} cpucache
 
 // locking {{{
+typedef union {
+  pthread_spinlock_t lock; // size == 4
+  u64 padding;
+} spinlock;
+typedef u64 rwlock;
+
+// spinlock {{{
   static inline void
 spinlock_init(spinlock * const lock)
 {
-  atomic_store(&lock->var, 0);
+  pthread_spin_init(&lock->lock, PTHREAD_PROCESS_PRIVATE);
+}
+
+  static inline void
+spinlock_lock(spinlock * const lock)
+{
+  pthread_spin_lock(&lock->lock);
 }
 
   static inline bool
-spinlock_trylock_nr(spinlock * const lock, u64 nr)
+spinlock_trylock_nr(spinlock * const lock, u16 nr)
 {
-  au16 * const pvar = (typeof(pvar))&(lock->var);
-  if (0u == atomic_fetch_add(pvar, 1u))
-    return true;
-
   do {
-    u16 z = 0u; // atomic cxhg changes z
-    if (atomic_compare_exchange_weak(pvar, &z, 1u))
+    if (0 == pthread_spin_trylock(&lock->lock))
       return true;
     _mm_pause();
   } while (nr--);
@@ -235,73 +259,80 @@ spinlock_trylock_nr(spinlock * const lock, u64 nr)
 }
 
   static inline void
-spinlock_lock(spinlock * const lock)
-{
-  au16 * const pvar = (typeof(pvar))&(lock->var);
-  do {
-    if (0u == atomic_fetch_add(pvar, 1u))
-      return;
-    do {
-      _mm_pause();
-    } while (atomic_load(pvar));
-  } while (true);
-}
-
-  static inline void
 spinlock_unlock(spinlock * const lock)
 {
-  atomic_store(&lock->var, 0);
+  pthread_spin_unlock(&lock->lock);
 }
+// }}} spinlock
 
-#define RWLOCK_WSHIFT ((15))
+// rwlock {{{
+typedef au32 lock_t;
+typedef u32 lock_v;
+static_assert(sizeof(lock_t) == sizeof(lock_v), "lock size");
+static_assert(sizeof(lock_t) <= sizeof(rwlock), "lock size");
+
+#define RWLOCK_WSHIFT ((sizeof(lock_t) * 8 - 1))
 #define RWLOCK_WBIT ((1u << RWLOCK_WSHIFT))
 
   static inline void
 rwlock_init(rwlock * const lock)
 {
-  au16 * const pvar = (typeof(pvar))(&(lock->var));
+  lock_t * const pvar = (typeof(pvar))lock;
   atomic_store(pvar, 0);
 }
 
   static inline bool
 rwlock_trylock_read(rwlock * const lock)
 {
-  au16 * const pvar = (typeof(pvar))(&(lock->var));
-  if ((atomic_fetch_add(pvar, 1u) >> RWLOCK_WSHIFT) == 0u) {
+  lock_t * const pvar = (typeof(pvar))lock;
+  if ((atomic_fetch_add(pvar, 1) >> RWLOCK_WSHIFT) == 0) {
     return true;
   } else {
-    atomic_fetch_sub(pvar, 1u);
+    atomic_fetch_sub(pvar, 1);
     return false;
   }
 }
 
 // actually nr + 1
   static inline bool
-rwlock_trylock_read_nr(rwlock * const lock, u64 nr)
+rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
 {
   if (rwlock_trylock_read(lock))
     return true;
+  lock_t * const pvar = (typeof(pvar))lock;
   do {
-    if (((atomic_load(&lock->var) >> RWLOCK_WSHIFT) == 0u) && rwlock_trylock_read(lock))
+    if (((atomic_load(pvar) >> RWLOCK_WSHIFT) == 0) && rwlock_trylock_read(lock))
       return true;
     _mm_pause();
   } while (nr--);
   return false;
 }
 
+// unused
+/*
+  static inline void
+rwlock_lock_read(rwlock * const lock)
+{
+  lock_t * const pvar = (typeof(pvar))lock;
+  while (rwlock_trylock_read(lock) == false)
+    while (atomic_load(pvar) >> RWLOCK_WSHIFT)
+      _mm_pause();
+}
+*/
+
   static inline void
 rwlock_unlock_read(rwlock * const lock)
 {
-  au16 * const pvar = (typeof(pvar))(&(lock->var));
-  atomic_fetch_sub(pvar, 1u);
+  lock_t * const pvar = (typeof(pvar))lock;
+  atomic_fetch_sub(pvar, 1);
 }
 
   static inline bool
 rwlock_trylock_write(rwlock * const lock)
 {
-  au16 * const pvar = (typeof(pvar))(&(lock->var));
-  u16 v0 = atomic_load(pvar);
-  if (v0 == 0u) {
+  lock_t * const pvar = (typeof(pvar))lock;
+  lock_v v0 = atomic_load(pvar);
+  if (v0 == 0) {
     if (atomic_compare_exchange_weak(pvar, &v0, RWLOCK_WBIT))
       return true;
   }
@@ -310,7 +341,7 @@ rwlock_trylock_write(rwlock * const lock)
 
 // actually nr + 1
   static inline bool
-rwlock_trylock_write_nr(rwlock * const lock, u64 nr)
+rwlock_trylock_write_nr(rwlock * const lock, u16 nr)
 {
   do {
     if (rwlock_trylock_write(lock))
@@ -323,32 +354,37 @@ rwlock_trylock_write_nr(rwlock * const lock, u64 nr)
   static inline void
 rwlock_lock_write(rwlock * const lock)
 {
+  lock_t * const pvar = (typeof(pvar))lock;
   while (rwlock_trylock_write(lock) == false)
-    while (atomic_load(&lock->var))
+    while (atomic_load(pvar))
       _mm_pause();
 }
 
   static inline void
 rwlock_unlock_write(rwlock * const lock)
 {
-  au16 * const pvar = (typeof(pvar))(&(lock->var));
+  lock_t * const pvar = (typeof(pvar))lock;
   atomic_fetch_sub(pvar, RWLOCK_WBIT);
 }
 
   static inline void
 rwlock_write_to_read(rwlock * const lock)
 {
-  au16 * const pvar = (typeof(pvar))(&(lock->var));
+  lock_t * const pvar = (typeof(pvar))lock;
   do {
-    u16 v0 = atomic_load(pvar);
+    lock_v v0 = atomic_load(pvar);
     debug_assert(v0 & RWLOCK_WBIT);
-    debug_assert(((v0 + 1u - RWLOCK_WBIT) & RWLOCK_WBIT) == 0u); // corner case
+    debug_assert(((v0 + 1 - RWLOCK_WBIT) & RWLOCK_WBIT) == 0); // corner case
     // +R -W
-    if (atomic_compare_exchange_weak(pvar, &v0, v0 + 1u - RWLOCK_WBIT))
+    if (atomic_compare_exchange_weak(pvar, &v0, v0 + 1 - RWLOCK_WBIT))
       break;
+    _mm_pause();
   } while (true);
 }
+
+#undef RWLOCK_WSHIFT
 #undef RWLOCK_WBIT
+// }}} rwlock
 // }}} locking
 
 // timing {{{
@@ -522,10 +558,11 @@ process_affinity_core_list(const u64 max, u64 * const cores)
   const u64 nr = nr_affinity < max ? nr_affinity : max;
   u64 j = 0;
   for (u64 i = 0; i < process_ncpu; i++) {
-    if (CPU_ISSET_S((int)i, process_cpu_set_size, set)) {
+    if (CPU_ISSET_S((int)i, process_cpu_set_size, set))
       cores[j++] = i;
-    }
-    if (j >= nr) break;
+
+    if (j >= nr)
+      break;
   }
   free(set);
   return j;
@@ -576,7 +613,7 @@ thread_do_fork_join_worker(void * const ptr)
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
     for (u64 span = span0; span; span >>= 1) {
-      const u64 cr = rank + span;
+      const u64 cr = rank + span; // child rank
       if (cr >= fji->tot)
         continue;
       struct fork_join_info * const cfji = &(fji->all[cr]);
@@ -589,6 +626,7 @@ thread_do_fork_join_worker(void * const ptr)
         sprintf(thname, "fj_%lu", cr);
         pthread_setname_np(cfji->tid, thname);
       } else {
+        fprintf(stderr, "pthread_create %lu..%lu = %d: %s\n", rank, cr, r, strerror(r));
         cfji->tid = 0;
       }
     }
@@ -601,28 +639,29 @@ thread_do_fork_join_worker(void * const ptr)
     if (cr >= fji->tot)
       break;
     struct fork_join_info * const cfji = &(fji->all[cr]);
-    if (cfji->tid)
-      pthread_join(cfji->tid, NULL);
+    if (cfji->tid) {
+      const int r = pthread_join(cfji->tid, NULL);
+      if (r)
+        fprintf(stderr, "pthread_join %lu..%lu = %d: %s\n", rank, cr, r, strerror(r));
+    } else {
+      fprintf(stderr, "skip joining %lu..%lu\n", rank, cr);
+    }
   }
   return ret;
 }
 
   double
-thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * const argv)
+thread_fork_join(const u64 nr, void *(*func) (void *), const bool args, void * const argx)
 {
-  if (nr == 0)
-    return 0.0;
+  const u64 nr_threads = nr ? nr : process_affinity_core_count();
+
   u64 cores[process_ncpu];
-  cpu_set_t * const set0 = process_cpu_set_alloc();
-
-  const bool force_all = (sched_getaffinity(0, process_cpu_set_size, set0) != 0) ? true : false;
-  u64 j = 0;
-  for (u64 i = 0; i < process_ncpu; i++)
-    if (force_all || CPU_ISSET_S((int)i, process_cpu_set_size, set0))
-      cores[j++] = i;
-
-  const u64 ncores = j;
-  const u64 nr_threads = nr ? nr : ncores;
+  u64 ncores = process_affinity_core_list(process_ncpu, cores);
+  if (ncores == 0) { // force to use all cores
+    ncores = process_ncpu;
+    for (u64 i = 0; i < process_ncpu; i++)
+      cores[i] = i;
+  }
 
   struct fork_join_info * const fjis = yalloc(sizeof(*fjis) * nr_threads);
   for (u64 i = 0; i < nr_threads; i++) {
@@ -631,9 +670,13 @@ thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * co
     fjis[i].core = cores[i % ncores];
     fjis[i].tid = 0;
     fjis[i].func = func;
-    fjis[i].argv = argv[i];
+    fjis[i].argv = args ? ((void **)argx)[i] : argx;
     fjis[i].all = fjis;
   }
+
+  // save current affinity
+  cpu_set_t * const set0 = process_cpu_set_alloc();
+  sched_getaffinity(0, process_cpu_set_size, set0);
 
   // master thread shares thread0's core
   cpu_set_t * const set = process_cpu_set_alloc();
@@ -653,15 +696,28 @@ thread_fork_join_private(const u64 nr, void *(*func) (void *), void * const * co
   return dt;
 }
 
-  double
-thread_fork_join(const u64 nr, void *(*func) (void *), void * const arg)
+  inline int
+thread_create_at(const u64 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg)
 {
-  const u64 nthreads = nr ? nr : process_affinity_core_count();
-  void * argv[nthreads];
-  for (u64 i = 0; i < nthreads; i++)
-    argv[i] = arg;
+  const u64 cpu_id = cpu % process_ncpu;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+  cpu_set_t * const set = process_cpu_set_alloc();
 
-  return thread_fork_join_private(nthreads, func, argv);
+  CPU_ZERO_S(process_cpu_set_size, set);
+  CPU_SET_S(cpu_id, process_cpu_set_size, set);
+  pthread_attr_setaffinity_np(&attr, process_cpu_set_size, set);
+  const int r = pthread_create(thread, &attr, start_routine, arg);
+  pthread_attr_destroy(&attr);
+  free(set);
+  return r;
+}
+
+  inline u64
+thread_get_core(void)
+{
+  return (u64)sched_getcpu();
 }
 // }}} process/thread
 
@@ -842,9 +898,9 @@ crc32c_extend(const u32 lo)
 // }}} crc32c
 
 // qsbr {{{
-#define QSBR_STATES_NR ((22)) // 3*8-2
+#define QSBR_STATES_NR ((46)) // 3*8-2
 #define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1lu)
-#define QSBR_SHARDS_NR  ((32))
+#define QSBR_SHARDS_NR  ((8))
 #define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARDS_NR))
 // QSBR_CAPACITY == 22 * 32 == 704
 struct qsbr { // 1 + (3 * 32) = 97 lines
@@ -858,35 +914,38 @@ struct qsbr { // 1 + (3 * 32) = 97 lines
   volatile u64 * wait_ptrs[QSBR_CAPACITY];
 };
 
-  static struct qsbr *
+  static inline struct qsbr *
 qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
   memset(q, 0, sizeof(*q));
+  for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
+    spinlock_init(&q->shards[i].lock);
   return q;
 }
 
   static inline struct qshard *
 qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
 {
-  const u32 sid = _mm_crc32_u64(0xDEADBEEFu, (u64)ptr) & ((u32)(QSBR_SHARDS_NR-1));
+  const u32 sid = _mm_crc32_u64(0xDEADBEEFu, (u64)ptr) % QSBR_SHARDS_NR;
   debug_assert(sid < QSBR_SHARDS_NR);
   return &(q->shards[sid]);
 }
 
-  static bool
+  static inline bool
 qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
 {
-  if (ptr == NULL)
-    return false;
+  debug_assert(ptr);
   struct qshard * const shard = qsbr_shard(q, ptr);
   spinlock_lock(&(shard->lock));
+  cpu_cfence();
 
   if (shard->bitmap < QSBR_BITMAP_FULL) {
-    const u64 pos = __builtin_ctzl(~(shard->bitmap));
+    const u32 pos = __builtin_ctzl(~(shard->bitmap));
     debug_assert(pos < QSBR_STATES_NR);
     shard->bitmap |= (1lu << pos);
     shard->ptrs[pos] = ptr;
+    cpu_cfence();
     spinlock_unlock(&(shard->lock));
     return true;
   }
@@ -894,7 +953,7 @@ qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
   return false;
 }
 
-  static void
+  static inline void
 qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 {
   if (ptr == NULL)
@@ -905,30 +964,33 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
     _mm_pause();
   }
 
+  cpu_cfence();
   u64 bits = shard->bitmap;
   debug_assert(bits < QSBR_BITMAP_FULL);
   while (bits) { // bits contains ones
-    const u64 pos = __builtin_ctzl(bits);
+    const u32 pos = __builtin_ctzl(bits);
     debug_assert(pos < QSBR_STATES_NR);
     if (shard->ptrs[pos] == ptr) {
-      shard->bitmap &= (~(1lu << pos));
+      shard->bitmap &= ~(1lu << pos);
       shard->ptrs[pos] = NULL;
+      cpu_cfence();
       spinlock_unlock(&(shard->lock));
       return;
     }
-    bits &= (~(1lu << pos));
+    bits &= ~(1lu << pos);
   }
   debug_die();
   spinlock_unlock(&(shard->lock));
 }
 
 // waiters needs external synchronization
-  static void
+  static inline void
 qsbr_wait(struct qsbr * const q, const u64 target)
 {
   q->target = target;
   for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
     spinlock_lock(&(q->shards[i].lock));
+  cpu_cfence();
 
   // collect wait_ptrs
   volatile u64 ** const wait_ptrs = q->wait_ptrs;
@@ -937,11 +999,11 @@ qsbr_wait(struct qsbr * const q, const u64 target)
     struct qshard * const shard = &(q->shards[i]);
     u64 bits = shard->bitmap;
     while (bits) { // bits contains ones
-      const u64 pos = __builtin_ctzl(bits);
+      const u32 pos = __builtin_ctzl(bits);
       debug_assert(pos < QSBR_STATES_NR);
       if (*(shard->ptrs[pos]) != target)
         wait_ptrs[nwait++] = shard->ptrs[pos];
-      bits &= (~(1lu << pos));
+      bits &= ~(1lu << pos);
     }
   }
 
@@ -949,17 +1011,19 @@ qsbr_wait(struct qsbr * const q, const u64 target)
   while (nwait) {
     for (u64 i = nwait - 1; i + 1; i--) { // nwait - 1 to 0
       if ((*(wait_ptrs[i])) == target) {
+        // erase i
         if (i < (nwait - 1))
           wait_ptrs[i] = wait_ptrs[nwait - 1];
         nwait--;
       }
     }
   }
+  cpu_cfence();
   for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
     spinlock_unlock(&(q->shards[i].lock));
 }
 
-  static void
+  static inline void
 qsbr_destroy(struct qsbr * const q)
 {
   free(q);
@@ -1367,7 +1431,13 @@ static const struct kvmap_mm kvmap_mm_default = {
 // def {{{
 #define WH_HMAPINIT_SIZE ((1lu << 14)) // 256k/1MB
 #define WH_SLABMETA_SIZE ((1lu << 21)) // 2MB
+
+#ifndef HEAPCHECKING
 #define WH_SLABLEAF_SIZE ((1lu << 21)) // 1GB; change to 2MB if no 1GB hugepages
+#else
+#define WH_SLABLEAF_SIZE ((1lu << 21)) // 2MB for valgrind
+#endif
+
 #define WH_KPN ((128u)) // keys per node; power of 2
 #define WH_HDIV (((1u << 16)) / WH_KPN)
 #define WH_MID ((WH_KPN >> 1)) // ideal cut point for split, the closer the better
@@ -1399,7 +1469,7 @@ struct wormleaf {
   struct kv * anchor;
   u64 nr_sorted;
   u64 nr_keys;
-  u64 version;
+  volatile u64 version;
   u64 klen;
   rwlock leaflock;
   struct entry13 eh[WH_KPN]; // sorted by hashes
@@ -1571,14 +1641,14 @@ wormhole_free_meta(struct slab * const slab, struct wormmeta * const meta)
   static inline bool
 wormhole_key_meta_match(const struct kv * const key, const struct wormmeta * const meta)
 {
-  return (((u32)(key->hash)) == meta->hash32) && (key->klen == meta->klen) &&
+  return (key->hashlo == meta->hash32) && (key->klen == meta->klen) &&
     (!memcmp(key->kv, meta->keyref->kv, key->klen));
 }
 
   static inline bool
 wormhole_kref_meta_match(const struct wormkref * const ref, const struct wormmeta * const meta)
 {
-  return (((u32)(ref->hash)) == meta->hash32) && (ref->plen == meta->klen) &&
+  return (ref->hashlo == meta->hash32) && (ref->plen == meta->klen) &&
     (!memcmp(ref->key, meta->keyref->kv, ref->plen));
 }
 
@@ -2261,6 +2331,7 @@ wormhole_jump_leaf_read(struct wormref * const ref, const struct kv * const key)
         rwlock_unlock_read(&(leaf->leaflock));
       }
       ref->qstate = (u64)(map->hmap);
+      _mm_pause();
     } while (leaf->version <= v);
   } while (true);
 }
@@ -2281,6 +2352,7 @@ wormhole_jump_leaf_write(struct wormref * const ref, const struct kv * const key
         rwlock_unlock_write(&(leaf->leaflock));
       }
       ref->qstate = (u64)(map->hmap);
+      _mm_pause();
     } while (leaf->version <= v);
   } while (true);
 }
@@ -2512,13 +2584,9 @@ wormhole_leaf_sync_sorted(struct wormleaf * const leaf)
   if (s == n)
     return;
 
-  if ((n < 8) || (s < 4u) || (((s - 2u) << 2) < n)) { // too few sorted
-    kvmap_entry_qsort(leaf->es, n);
-  } else { // worth a two-step sort
-    kvmap_entry_qsort(&(leaf->es[s]), n - s);
-    // merge-sort inplace
-    wormhole_leaf_sort_m2(leaf->es, s, (n - s));
-  }
+  kvmap_entry_qsort(&(leaf->es[s]), n - s);
+  // merge-sort inplace
+  wormhole_leaf_sort_m2(leaf->es, s, (n - s));
   leaf->nr_sorted = n;
 }
 
@@ -3126,7 +3194,16 @@ wormhole_leaf_del(struct wormhole * const map, struct wormleaf * const leaf, con
   wormhole_leaf_magnet_eh(eh, im);
 }
 
-// all go to leaf1
+/*
+  MERGE is the only operation that deletes a leaf node (leaf2).
+  It ALWAYS merge the right node into the left node even if the left is empty.
+  This requires both of their writer locks to be acquired.
+  This allows iterators to safely probe the next node (but not backwards).
+  In other words, if either the reader or the writer lock of node X has been acquired:
+    X->next (the pointer) cannot be changed by any other thread.
+    X->next cannot be deleted.
+    But the content in X->next can still be changed.
+*/
   static void
 wormhole_merge_leaf_move(struct wormleaf * const leaf1, struct wormleaf * const leaf2)
 {
@@ -3198,6 +3275,7 @@ wormhole_merge_meta(struct wormhmap * const hmap, struct wormleaf * const leaf)
   free(pbuf); // malloc-ed above
 }
 
+
 // all locks (metalock + two leaflock) will be released before returning
 // merge leaf2 to leaf1, removing all metadata to leaf2 and leaf2 itself
   static void
@@ -3244,9 +3322,11 @@ wormhole_merge_ref(struct wormref * const ref, struct wormleaf * const leaf1,
 wormhole_may_merge(struct wormref * const ref, struct wormleaf * const leaf)
 {
   struct wormhole * const map = ref->map;
+  // update qstate is safe here because no one can delete the leaf
   while (rwlock_trylock_write_nr(&(map->metalock), 64) == false)
     ref->qstate = (u64)(map->hmap);
 
+  cpu_cfence();
   // now leaf and meta are both locked (w)
   struct wormleaf * const next = leaf->next;
   debug_assert(next);
@@ -3264,6 +3344,8 @@ wormhole_may_merge(struct wormref * const ref, struct wormleaf * const leaf)
   return false;
 }
 
+// force merge removes an empty leaf node
+// Is this absolutely safe (dead lock)?
   static void
 wormhole_force_merge(struct wormref * const ref, struct wormleaf * const leaf)
 {
@@ -3274,8 +3356,12 @@ wormhole_force_merge(struct wormref * const ref, struct wormleaf * const leaf)
   // now leaf and meta are both locked (w)
   struct wormleaf * const next = leaf->next;
   debug_assert(next);
-  while (rwlock_trylock_write_nr(&(next->leaflock), 64) == false)
-    ref->qstate = (u64)(map->hmap);
+
+  rwlock_lock_write(&(next->leaflock));
+  // already holds metalock, no need to update qstate
+  //while (rwlock_trylock_write_nr(&(next->leaflock), 64) == false)
+  //  ref->qstate = (u64)(map->hmap);
+
   // three locked
   wormhole_merge_ref(ref, leaf, next);
 }
@@ -3290,11 +3376,12 @@ wormhole_del(struct wormref * const ref, const struct kv * const key)
     wormhole_leaf_del(ref->map, leaf, im);
     r = true;
 
-    // maybe merge
     if ((leaf->nr_keys == 0u) && leaf->next) {
       wormhole_force_merge(ref, leaf); // wormhole_force_merge releases the lock
       return r;
     }
+
+    // maybe merge
     struct wormleaf * const next = leaf->next;
     if (next && ((leaf->nr_keys + next->nr_keys) < WH_KPN_MRG)) {
       (void)wormhole_may_merge(ref, leaf); // wormhole_may_merge releases the lock

@@ -30,22 +30,28 @@ else ifeq ($O,r) # make O=r
 OPT ?= -DNDEBUG -O3 -flto
 else ifeq ($O,rg) # make O=rg
 OPT ?= -g3 -DNDEBUG -O3 -flto
-else ifeq ($O,c) # make O=c (for gcov)
-OPT ?= -g3 -O0 --coverage -fno-inline
+else ifeq ($O,san) # make O=san (address sanitizer)
+OPT ?= -g3 -O0 -fsanitize=address -DHEAPCHECKING
+else ifeq ($O,cov) # make O=c (for gcov)
+OPT ?= -g3 -O0 --coverage
 else ifeq ($O,mc) # make O=mc (for valgrind memcheck)
-OPT ?= -g3 -DHEAPCHECKING -O2 -fno-inline
+OPT ?= -g3 -O2 -fno-inline -DHEAPCHECKING
+ARCH ?= broadwell
 else ifeq ($O,hc) # make O=hc (for gperftools heapcheck)
 OPT ?= -g3 -O2 -fno-inline
 LIB += tcmalloc
+else ifeq ($O,warn) # more warning
+OPT ?= -g3 -O3 -Wvla -Wformat=2
 else # 0g
-OPT ?= -DNDEBUG -O3 -flto
+OPT ?= -g3 -O0
 endif
 
 NBI += memcpy memmove memcmp
+ARCH ?= native
 
 # minimal arch requirement: -march=nehalem
-FLG += -march=native -mtune=native -pthread
-FLG += -std=gnu11 -Wall -Wextra -Wshadow
+FLG += -march=$(ARCH)
+FLG += -pthread -std=gnu11 -Wall -Wextra -Wshadow
 FLG += $(addprefix -fno-builtin-,$(NBI))
 FLG += $(OPT)
 
@@ -58,7 +64,7 @@ dis : $(DIS) bin
 .SECONDEXPANSION:
 %.out : %.c $(DEP) $$(DEP-$$@) $$(addsuffix .c,$$(SRC-$$@) $$(MOD-$$@)) $$(addsuffix .h,$$(MOD-$$@)) $$(addsuffix .S,$$(ASM-$$@))
 	$(eval ALLSRC := $(SRC) $(addsuffix .c,$(SRC-$@) $(MOD-$@)) $(ASM) $(addsuffix .S,$(ASM-$@)))
-	$(eval ALLFLG := $(FLG) $(FLG-$@))
+	$(eval ALLFLG := $(FLG) $(FLG-$@) -rdynamic)
 	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
 	$(CCC) $(EXTRA) $(ALLFLG) -o $@ $< $(ALLSRC) $(ALLLIB)
 
