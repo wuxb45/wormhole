@@ -50,7 +50,7 @@ NBI += memcpy memmove memcmp
 ARCH ?= native
 
 # minimal arch requirement: -march=nehalem
-FLG += -march=$(ARCH)
+FLG += -march=$(ARCH) -mtune=$(ARCH)
 FLG += -pthread -std=gnu11 -Wall -Wextra -Wshadow
 FLG += $(addprefix -fno-builtin-,$(NBI))
 FLG += $(OPT)
