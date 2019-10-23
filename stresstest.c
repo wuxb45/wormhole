@@ -33,11 +33,11 @@ kv_load_worker(struct wormhole * const wh)
   printf("load worker %lu %lu\n", n0, nz);
 
   char * buf = malloc(8192);
-  char * ss[6];
+  char * ss[4];
   for (u64 i = n0; i < nz; i++) {
-    for (u64 j = 0; j < 6; j++)
-      ss[j] = words[random() % nr_words];
-    sprintf(buf, "%s %s %s %s %s %s!", ss[0], ss[1], ss[2], ss[3], ss[4], ss[5]);
+    for (u64 j = 0; j < 4; j++)
+      ss[j] = words[random_u64() % nr_words];
+    sprintf(buf, "%s %s %s %s!", ss[0], ss[1], ss[2], ss[3]);
     samples[i] = kv_create_str(buf, "");
     wormhole_set(ref, samples[i]);
   }
