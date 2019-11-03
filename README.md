@@ -83,9 +83,9 @@ Wormhole internally uses QSBR RCU to synchronize readers/writers so every holder
 needs to actively perform index operations.
 An ref-holder, if not actively performing index operations, may block a writer thread that is performing split/merge operations.
 (because of not periodically announcing its quiescent state).
-If a ref-holder is about to become inactive (regarding to performing Wormhole operations),
+If a ref-holder is about to become inactive from Wormhole's perspective (doing something else or just sleeping),
 it is recommended that the holder temporarily releases the `ref` before entering the inactive status (such as calling `sleep(10)`),
-and obtains a new `ref` after `sleep()`.
+and obtains a new `ref` before performing the next index operation.
 
     // holding a ref
     wormhole_unref(ref);
@@ -94,7 +94,7 @@ and obtains a new `ref` after `sleep()`.
     // perform index operations with (the new) ref
 
 However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
-If the ref-holder thread is busy-waiting in a loop and does not sleep, a better way to avoid blocking is to periodically call `wormhole_refresh_qstate()`. this method has negligible cost (two instructios) and does not interfere with other threads.
+A better solution is available if the ref-holder thread is able to periodically update its quiescent state by call `wormhole_refresh_qstate()`. This method has negligible cost (only two instructions) and does not interfere with other threads.
 For example:
 
     // holding a ref
