@@ -94,7 +94,7 @@ and obtains a new `ref` before performing the next index operation.
     // perform index operations with (the new) ref
 
 However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
-A better solution is available if the ref-holder thread is able to periodically update its quiescent state by call `wormhole_refresh_qstate()`. This method has negligible cost (only two instructions) and does not interfere with other threads.
+A better solution is available if the ref-holder thread can periodically update its quiescent state by call `wormhole_refresh_qstate()`. This method has negligible cost (only two instructions) and does not interfere with other threads.
 For example:
 
     // holding a ref
