@@ -227,6 +227,9 @@ wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const ke
 wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out);
 
   extern void
+wormhole_iter_skip(struct wormhole_iter * const iter, const u64 nr);
+
+  extern void
 wormhole_iter_destroy(struct wormhole_iter * const iter);
 
   extern struct wormref *
@@ -269,6 +272,9 @@ wormhole_iter_seek_unsafe(struct wormhole_iter * const iter, const struct kv * c
 
   extern struct kv *
 wormhole_iter_next_unsafe(struct wormhole_iter * const iter, struct kv * const out);
+
+  extern void
+wormhole_iter_skip_unsafe(struct wormhole_iter * const iter, const u64 nr);
 
   extern void
 wormhole_iter_destroy_unsafe(struct wormhole_iter * const iter);
