@@ -78,6 +78,7 @@ A thread needs to hold a reference of the index (_wormref_) to perform safe inde
     wormhole_unref(ref);
     wormhole_destroy(index);
 
+### Avoid blocking writers
 Wormhole internally uses QSBR RCU to synchronize readers/writers so every holder of a reference (`ref`)
 needs to actively perform index operations.
 An ref-holder, if not actively performing index operations, may block a writer thread that is performing split/merge operations.
