@@ -8,6 +8,7 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 ## Highlights:
 * Thread-safety: `get`, `set`, `del`, `iter-seek`, `iter-next`, etc. are all thread-safe. See `stresstest.c` for more operations.
 * Long keys are welcome! The key-length field (`klen`) is a 32-bit unsigned integer and the maximum size of a key is 4GB.
+* No background threads or global status. Wormhole uses user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
 
 # Build
 
