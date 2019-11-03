@@ -13,8 +13,6 @@
 #include <time.h>
 #include "wh.h"
 
-u64 nr_words = 0;
-char ** words = NULL;
 atomic_uint_least64_t seqno = 0;
 u64 nth = 0;
 struct kv ** samples = NULL;
@@ -25,22 +23,25 @@ u64 endtime = 0;
   static void *
 kv_load_worker(struct wormhole * const wh)
 {
-  srandom_u64(rdtsc() * rdtsc());
+  srandom_u64(time_nsec() * time_nsec() * time_nsec());
   struct wormref * const ref = wormhole_ref(wh);
   const u64 seq = atomic_fetch_add(&seqno, 1);
   const u64 n0 = nkeys / nth * seq;
   const u64 nz = (seq == (nth - 1)) ? nkeys : (nkeys / nth * (seq + 1));
-  printf("load worker %lu %lu\n", n0, nz);
+  printf("load worker %lu %lu\n", n0, nz-1);
 
-  char * buf = malloc(8192);
-  char * ss[4];
+  char * buf = malloc(1024);
+  u64 * buf64 = (typeof(buf64))buf;
   for (u64 i = n0; i < nz; i++) {
-    for (u64 j = 0; j < 4; j++)
-      ss[j] = words[random_u64() % nr_words];
-    sprintf(buf, "%s %s %s %s!", ss[0], ss[1], ss[2], ss[3]);
-    samples[i] = kv_create_str(buf, "");
+    const u64 klen = 8 + (random_u64() & 0x3f);
+    const u64 klen8 = (klen + 7) >> 3;
+    for (u64 j = 0; j < klen8; j++)
+      buf64[j] = random_u64();
+
+    samples[i] = kv_create(buf, klen, NULL, 0);
     wormhole_set(ref, samples[i]);
   }
+  free(buf);
   wormhole_unref(ref);
   return NULL;
 }
@@ -48,28 +49,28 @@ kv_load_worker(struct wormhole * const wh)
   static void *
 kv_probe_worker(struct wormhole * const wh)
 {
-  srandom_u64(rdtsc() * rdtsc());
+  srandom_u64(time_nsec() * time_nsec() * time_nsec());
   struct wormref * ref = wormhole_ref(wh);
   struct kv * next = samples[random_u64() % nkeys];
   u64 rnext = random_u64() % nkeys;
   struct kv * const getbuf = malloc(1000);
   struct sbuf * const sbuf = malloc(1000);
   struct wormhole_iter * iter;
-#define BATCHSIZE ((1000))
+#define BATCHSIZE ((4096))
   do {
     for (u64 i = 0; i < BATCHSIZE; i++) {
       // reading kv samples leads to unnecessary cache misses
       // use prefetch to minimize overhead on workload generation
       struct kv * const key = next;
       next = samples[rnext];
-      __builtin_prefetch(next, 0, 0);
-      __builtin_prefetch(((u8 *)next) + 64, 0, 0);
+      __builtin_prefetch(next, 0);
+      __builtin_prefetch(((u8 *)next) + 64, 0);
       rnext = random_u64() % nkeys;
-      __builtin_prefetch(&(samples[rnext]));
+      __builtin_prefetch(&(samples[rnext]), 0);
 
       // do probe
       // customize your benchmark: do a mix of wh operations with switch-cases
-      const u64 r = rdtsc() % 12;
+      const u64 r = random_u64() % 16;
       //ctrs[r]++;
       switch (r) {
       case 0:
@@ -84,20 +85,21 @@ kv_probe_worker(struct wormhole * const wh)
       case 3:
         (void)wormhole_getu64(ref, key);
         break;
-      case 4:
+      case 4: case 5: case 6:
         iter = wormhole_iter_create(ref);
         wormhole_iter_seek(iter, key);
-        (void)wormhole_iter_next(iter, getbuf);
+        for (u64 n = 0; n < r; n++)
+          wormhole_iter_next(iter, getbuf);
         wormhole_iter_destroy(iter);
         break;
-      case 5:
+      case 7: case 8:
         (void)wormhole_unref(ref);
         ref = wormhole_ref(wh);
         break;
-      case 6: case 7:
+      case 9: case 10: case 11:
         (void)wormhole_del(ref, key);
         break;
-      case 8: case 9: case 10: case 11:
+      case 12: case 13: case 14: case 15:
         (void)wormhole_set(ref, key);
         break;
       default:
@@ -117,51 +119,26 @@ kv_probe_worker(struct wormhole * const wh)
 main(int argc, char ** argv)
 {
   if (argc < 4) {
-    printf("usage: <words-file> <#keys> <#threads> [<rounds>]\n");
-    printf("  Get words.txt: wget https://github.com/dwyl/english-words/raw/master/words.txt\n");
-    printf("  Example: %s words.txt 1000000 4\n", argv[0]);
+    printf("usage: <#keys> <#load-threads> <#threads> [<rounds>]\n");
+    printf("  Example: %s 1000000 4 10\n", argv[0]);
     printf("  Better to use only one numa node with numactl -N 0\n");
     printf("  Better to run X thread on X cores\n");
     return 0;
   }
 
-  words = malloc(sizeof(char *) * 1000000); // or `wc -l words.txt`
-  nr_words = 0;
-  char * buf = malloc(8192);
-  size_t bufsize = 8192;
-  FILE * const fwords = fopen(argv[1], "r");
-  if (fwords == NULL) {
-    printf("open words file failed\n");
-    return 0;
-  }
-
-  // read all words to words
-  while ((nr_words < 1000000) && (getline(&buf, &bufsize, fwords) > 0)) {
-    buf[strlen(buf)-1] = '\0';
-    words[nr_words] = strdup(buf);
-    nr_words++;
-  }
-  free(buf);
-  fclose(fwords);
-
   // generate keys
-  nkeys = strtoull(argv[2], NULL, 10);
+  nkeys = strtoull(argv[1], NULL, 10);
   samples = malloc(sizeof(struct kv *) * nkeys);
 
   // gen keys and load (4)
   struct wormhole * const wh = wormhole_create(NULL);
-  nth = 4;
+  nth = strtoull(argv[2], NULL, 10);
   const double dtl = thread_fork_join(nth, (void *)kv_load_worker, false, (void *)wh);
-  printf("gen and load x4 %.2lf mops\n", ((double)nkeys) / dtl * 1e-6);
-
-  // free words & buf
-  for (u64 i = 0; i < nr_words; i++)
-    free(words[i]);
-  free(words);
+  printf("gen and load x%lu  %.2lf mops\n", nth, ((double)nkeys) / dtl * 1e-6);
 
   nth = strtoull(argv[3], NULL, 10);
   printf("stresstest with %lu threads.\n", nth);
-  u64 todo = (argc >= 5) ? strtoull(argv[4], NULL, 10) : ~0lu;
+  u64 todo = (argc >= 5) ? strtoull(argv[4], NULL, 10) : ~0lu; // default is forever
   while (todo--) {
     tot = 0;
     endtime = time_nsec() + 2e9;
