@@ -904,12 +904,11 @@ crc32c_extend(const u32 lo)
 // }}} crc32c
 
 // qsbr {{{
-#define QSBR_STATES_NR ((46)) // 3*8-2
+#define QSBR_STATES_NR ((38)) // 3*8-2 or 5*8-2 or 7*8-2
 #define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1lu)
 #define QSBR_SHARDS_NR  ((8))
 #define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARDS_NR))
-// QSBR_CAPACITY == 22 * 32 == 704
-struct qsbr { // 1 + (3 * 32) = 97 lines
+struct qsbr {
   volatile u64 target;
   u64 padding0[7];
   struct qshard {
@@ -3149,10 +3148,9 @@ wormhole_split_insert_unsafe(struct wormhole * const map, struct wormleaf * cons
   bool
 wormhole_set(struct wormref * const ref, const struct kv * const kv0)
 {
-  struct wormhole * const map = ref->map;
   // we always allocate a new item on SET
   // future optimizations may perform in-place update
-  struct kv * const new = wormhole_alloc_kv(map, kv0->klen, kv0->vlen);
+  struct kv * const new = wormhole_alloc_kv(ref->map, kv0->klen, kv0->vlen);
   if (new == NULL)
     return false;
   kv_dup2(kv0, new);
@@ -3161,7 +3159,7 @@ wormhole_set(struct wormref * const ref, const struct kv * const kv0)
   // update
   const u64 im = wormhole_leaf_match(leaf, new);
   if (im < WH_KPN) {
-    wormhole_set_update(map, leaf, im, new);
+    wormhole_set_update(ref->map, leaf, im, new);
     rwlock_unlock_write(&(leaf->leaflock));
     return true;
   }
@@ -3201,6 +3199,40 @@ wormhole_set_unsafe(struct wormhole * const map, const struct kv * const kv0)
 
   // changes hmap
   return wormhole_split_insert_unsafe(map, leaf, new);
+}
+// }}} set
+
+// update {{{
+  bool
+wormhole_update(struct wormref * const ref, const struct kv * const kv0,
+    kv_update_func uf, void * const priv)
+{
+  struct wormleaf * const leaf = wormhole_jump_leaf_write(ref, kv0);
+  // update
+  const u64 im = wormhole_leaf_match(leaf, kv0);
+  if (im < WH_KPN) {
+    uf(u64_to_ptr(leaf->eh[im].e3), priv);
+    rwlock_unlock_write(&(leaf->leaflock));
+    return true;
+  } else {
+    rwlock_unlock_write(&(leaf->leaflock));
+    return false;
+  }
+}
+
+  bool
+wormhole_update_unsafe(struct wormhole * const map, const struct kv * const kv0,
+    kv_update_func uf, void * const priv)
+{
+  struct wormleaf * const leaf = wormhole_jump_leaf(map->hmap, kv0);
+  // update
+  const u64 im = wormhole_leaf_match(leaf, kv0);
+  if (im < WH_KPN) { // overwrite
+    uf(u64_to_ptr(leaf->eh[im].e3), priv);
+    return true;
+  } else {
+    return false;
+  }
 }
 // }}} set
 
@@ -3688,6 +3720,12 @@ wormhole_unref(struct wormref * const ref)
   qsbr_unregister(map->qsbr, &(ref->qstate));
   free(ref);
   return map;
+}
+
+  inline void
+wormhole_refresh_qstate(struct wormref * const ref)
+{
+  ref->qstate = (u64)(ref->map->hmap);
 }
 
 // unsafe

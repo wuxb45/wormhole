@@ -38,12 +38,21 @@ kv_load_worker(struct wormhole * const wh)
     for (u64 j = 0; j < klen8; j++)
       buf64[j] = random_u64();
 
-    samples[i] = kv_create(buf, klen, NULL, 0);
+    samples[i] = kv_create(buf, klen, buf, 1); // vlen == 1
     wormhole_set(ref, samples[i]);
   }
   free(buf);
   wormhole_unref(ref);
   return NULL;
+}
+
+  static void
+update_plus1(struct kv * const kv0, void * priv)
+{
+  (void)priv;
+  // WARNING! the update function should never change struct-kv's metadata and key
+  u8 * const pv = kv_vptr(kv0);
+  (*pv)++;
 }
 
   static void *
@@ -92,9 +101,12 @@ kv_probe_worker(struct wormhole * const wh)
           wormhole_iter_next(iter, getbuf);
         wormhole_iter_destroy(iter);
         break;
-      case 7: case 8:
+      case 7:
         (void)wormhole_unref(ref);
         ref = wormhole_ref(wh);
+        break;
+      case 8:
+        (void)wormhole_update(ref, key, update_plus1, NULL);
         break;
       case 9: case 10: case 11:
         (void)wormhole_del(ref, key);
