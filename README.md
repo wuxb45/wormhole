@@ -85,15 +85,23 @@ An ref-holder, if not actively performing index operations, may block a writer t
 (because of not periodically announcing its quiescent state).
 If a ref-holder is about to become inactive (regarding to performing Wormhole operations),
 it is recommended that the holder temporarily releases the `ref` before entering the inactive status (such as calling `sleep(10)`),
-and obtain a new `ref` after that sleep(). Repeatedly calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
-If ref-holder thread is busy-waiting in a loop and does not sleep, a better way is to periodically call `wormhole_refresh_qstate()`.
+and obtains a new `ref` after `sleep()`.
+
+    // holding a ref
+    wormhole_unref(ref);
+    sleep(10);
+    ref = wormhole_ref(map);
+    // perform index operations with (the new) ref
+
+However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
+If the ref-holder thread is busy-waiting in a loop and does not sleep, a better way to avoid blocking is to periodically call `wormhole_refresh_qstate()`. this method has negligible cost (two instructios) and does not interfere with other threads.
 For example:
 
     // holding a ref
     while (wait_for_client_with_timeout_10us(...)) {
-      wormhole_refresh_qstate(ref);
+      wormhole_refresh_qstate(ref);  // only two mov instructions on x86_64
     }
-    // continue to access index with ref
+    // perform index operations with ref
 
 ### The thread-unsafe API
 A set of *thread-unsafe* functions are also provided. See the functions with suffix `_unsafe`.
