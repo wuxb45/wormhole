@@ -5,19 +5,20 @@ The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered 
 This repository maintains a reference implementation of the Wormhole index structure on x86\_64 Linux with SSE 4.2.
 The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
 
-Please read this README and the sample programs before using Wormhole in your code.
+## Highlights:
+* Thread-safety: `get`, `set`, `del`, `iter-seek`, `iter-next`, etc. are all thread-safe. See `stresstest.c` for more operations.
+* Long keys are welcome! The key-length field (`klen`) is a 32-bit unsigned integer and the maximum size of a key is 4GB.
 
 # Build
 
-The project was developed & tested on a 64-bit Linux.
-Some Linux-specific APIs are used (e.g., `mmap`) so porting to MacOS/Windows may take some effort.
+Wormhole was developed & tested on x86\_64 Linux.
 Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ CCC=gcc make`).
 
 To build:
 
     $ make
 
-Alternatively, you may use `O=0g` to enable debug info and disable optimizations:
+Alternatively, you may use `O=0g` to enable debug info and disable optimizations (very slow):
 
     $ O=0g make
 
@@ -33,10 +34,14 @@ Each line of the input becomes a key in the index. Duplicates are allowed from t
 It generates six-word keys based on a word list (words.txt). See `sprintf` in `concbench.c`.
 
     $ wget https://github.com/dwyl/english-words/raw/master/words.txt
-    
+
     $ ./concbench.out words.txt 10000000 4
-    
+
     $ numactl -N 0 ./concbench.out words.txt 10000000 4
+
+`stresstest.out` tests a mix of all thread-safe operations.
+
+`libwh.so` can be linked to any C/C++ program with the help of `wh.h`.
 
 # The code
 
@@ -87,7 +92,8 @@ The thread-unsafe functions don't use the reference (_wormref_). Simply feed it 
     wormhole_destroy(index);
 
 ### light-weight GET functions
-`wormhole_get()` returns a full copy of the key-value pair to the user-provided buffer (or malloc-ed if `out == 0`). This can be suboptimal if dealing with long keys and short values. To minimize copying, the `wormhole_getv` and `wormhole_getu64` functions avoid copying the the key.
+`wormhole_get()` returns a full copy of the key-value pair to the user-provided buffer (or malloc-ed if `out == 0`). This can be suboptimal when dealing with long keys and short values.
+To minimize copying, the `wormhole_getv` and `wormhole_getu64` functions avoid copying the key.
 
 `wormhole_getu64` returns 0 if the key if not found or the value's length is shorter than 8 bytes. This can be useful if the application logic treats "`value == 0`" as equivalent to "not found".
 
