@@ -7,7 +7,8 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 
 ## Highlights:
 * Thread-safety: `get`, `set`, `update`, `del`, `iter-seek`, `iter-next`, etc. are all thread-safe. See `stresstest.c` for more operations.
-* Long keys are welcome! The key-length field (`klen`) is a 32-bit unsigned integer and the maximum size of a key is 4GB.
+* Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
+* Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4GB.
 * No background threads or global status. Wormhole uses user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
 
 # Build
@@ -140,6 +141,12 @@ but not the other objects in Wormhole, such as hash table and tree nodes.
 Wormhole uses hugepages when available. To reserve some hugepages in Linux (10000 * 2MB):
 
     # echo 10000 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+## Tuning
+A few macros in `wh.c` can be tuned.
+* `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation. If the system has 1GB hugepages available, `WH_SLABLEAF_SIZE` be set to `((1lu << 30))` to utilize those 1GB hugepages. The default is `((1lu << 21))` (2MB slabs).
+* `WH_KPN` is "Keys Per (leaf-)Node". Change it to 256 can increase search speed by roughly 10% but slows down internal split and merge operations (not every insertion/deletion). The default is 128.
+* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU. The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n. The defaults are set to 38 and 8, respectively. This QSBR implementation uses sharding so `wormhole_ref()` will be blocked (busy-waiting) if the target shard is full.
+
 
 ## Performance
 Some benchmarking results with some real-world datasets: See [this](https://github.com/wuxb45/wormhole/issues/5) page for more information.
