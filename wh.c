@@ -3283,18 +3283,22 @@ wormhole_merge_leaf_move(struct wormleaf * const leaf1, struct wormleaf * const 
 {
   const u64 nr1 = leaf1->nr_keys;
   const u64 nr2 = leaf2->nr_keys;
+  if (nr2 == 0)
+    return;
+
   debug_assert((nr1 + nr2) <= WH_KPN);
   struct entry13 * const eh1 = leaf1->eh;
-  struct entry13 * const eh2 = leaf2->eh;
-  for (u64 i = 0; i < WH_KPN; i++) {
+  struct entry13 * const es2 = leaf2->es;
+
+  for (u64 i = 0; i < nr2; i++) {
     // callers are merger, no need to clear eh2
-    if (eh2[i].v64)
-      wormhole_leaf_insert_eh(eh1, eh2[i]);
+    debug_assert(es2[i].v64);
+    wormhole_leaf_insert_eh(eh1, es2[i]);
   }
   leaf1->nr_keys = nr1 + nr2; // nr_sorted remain unchanged
   // move es
   memcpy(&(leaf1->es[nr1]), &(leaf2->es[0]), sizeof(leaf2->es[0]) * nr2);
-  // if already sorted
+  // if leaf1 is already sorted
   if (leaf1->nr_sorted == nr1)
     leaf1->nr_sorted += leaf2->nr_sorted;
 }
@@ -3356,6 +3360,7 @@ wormhole_merge_meta(struct wormhmap * const hmap, struct wormleaf * const leaf)
 wormhole_merge_ref(struct wormref * const ref, struct wormleaf * const leaf1,
     struct wormleaf * const leaf2)
 {
+  debug_assert(leaf1->next == leaf2);
   wormhole_merge_leaf_move(leaf1, leaf2);
 
   struct wormhole * const map = ref->map;
@@ -3455,7 +3460,11 @@ wormhole_del(struct wormref * const ref, const struct kv * const key)
       return r;
     }
 
-    // maybe merge
+    // merge-left is unsafe even if locks are correctly acquired
+    // this is because iterators can move right following ->next
+    // iterator functions must to be changed to allow left-merge here
+
+    // maybe merge right
     struct wormleaf * const next = leaf->next;
     if (next && ((leaf->nr_keys + next->nr_keys) < WH_KPN_MRG)) {
       (void)wormhole_may_merge(ref, leaf); // wormhole_may_merge releases the lock
@@ -3471,6 +3480,7 @@ wormhole_del(struct wormref * const ref, const struct kv * const key)
 wormhole_merge_unsafe(struct wormhole * const map, struct wormleaf * const leaf1,
     struct wormleaf * const leaf2)
 {
+  debug_assert(leaf1->next == leaf2);
   wormhole_merge_leaf_move(leaf1, leaf2);
   struct wormhmap * const hmap0 = map->hmap;
 
@@ -3490,6 +3500,15 @@ wormhole_del_unsafe(struct wormhole * const map, const struct kv * const key)
   const u64 im = wormhole_leaf_match(leaf, key);
   if (im < WH_KPN) { // found
     wormhole_leaf_del(map, leaf, im);
+
+    if (leaf->nr_keys == 0u) {
+      if (leaf->prev) { // unsafe del can merge to left
+        wormhole_merge_unsafe(map, leaf->prev, leaf);
+      } else if (leaf->next) {
+        wormhole_merge_unsafe(map, leaf, leaf->next);
+      }
+      return true;
+    }
 
     struct wormleaf * const next = leaf->next;
     if (next && ((leaf->nr_keys + next->nr_keys) < WH_KPN_MRG))
