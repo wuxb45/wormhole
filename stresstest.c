@@ -11,11 +11,12 @@
 #include <immintrin.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <byteswap.h>
 #include "wh.h"
 
 atomic_uint_least64_t seqno = 0;
 u64 nth = 0;
-struct kv ** samples = NULL;
+struct kv ** keys = NULL;
 u64 nkeys = 0;
 atomic_uint_least64_t tot = 0;
 u64 endtime = 0;
@@ -35,11 +36,12 @@ kv_load_worker(struct wormhole * const wh)
   for (u64 i = n0; i < nz; i++) {
     const u64 klen = 8 + (random_u64() & 0x3f);
     const u64 klen8 = (klen + 7) >> 3;
-    for (u64 j = 0; j < klen8; j++)
+    buf64[0] = bswap_64(i); // little endian
+    for (u64 j = 1; j < klen8; j++)
       buf64[j] = random_u64();
 
-    samples[i] = kv_create(buf, klen, buf, 1); // vlen == 1
-    wormhole_set(ref, samples[i]);
+    keys[i] = kv_create(buf, klen, buf, 8); // vlen == 8
+    wormhole_set(ref, keys[i]);
   }
   free(buf);
   wormhole_unref(ref);
@@ -47,11 +49,11 @@ kv_load_worker(struct wormhole * const wh)
 }
 
   static void
-update_plus1(struct kv * const kv0, void * priv)
+kv_update_plus1(struct kv * const kv0, void * const priv)
 {
   (void)priv;
   // WARNING! the update function should never change struct-kv's metadata and key
-  u8 * const pv = kv_vptr(kv0);
+  u64 * pv = kv_vptr(kv0);
   (*pv)++;
 }
 
@@ -60,7 +62,7 @@ kv_probe_worker(struct wormhole * const wh)
 {
   srandom_u64(time_nsec() * time_nsec() * time_nsec());
   struct wormref * ref = wormhole_ref(wh);
-  struct kv * next = samples[random_u64() % nkeys];
+  struct kv * next = keys[random_u64() % nkeys];
   u64 rnext = random_u64() % nkeys;
   struct kv * const getbuf = malloc(1000);
   struct sbuf * const sbuf = malloc(1000);
@@ -68,14 +70,14 @@ kv_probe_worker(struct wormhole * const wh)
 #define BATCHSIZE ((4096))
   do {
     for (u64 i = 0; i < BATCHSIZE; i++) {
-      // reading kv samples leads to unnecessary cache misses
+      // reading kv keys leads to unnecessary cache misses
       // use prefetch to minimize overhead on workload generation
       struct kv * const key = next;
-      next = samples[rnext];
+      next = keys[rnext];
       __builtin_prefetch(next, 0);
       __builtin_prefetch(((u8 *)next) + 64, 0);
       rnext = random_u64() % nkeys;
-      __builtin_prefetch(&(samples[rnext]), 0);
+      __builtin_prefetch(&(keys[rnext]), 0);
 
       // do probe
       // customize your benchmark: do a mix of wh operations with switch-cases
@@ -101,17 +103,17 @@ kv_probe_worker(struct wormhole * const wh)
           wormhole_iter_next(iter, getbuf);
         wormhole_iter_destroy(iter);
         break;
-      case 7:
+      case 7: case 8:
         (void)wormhole_unref(ref);
         ref = wormhole_ref(wh);
         break;
-      case 8:
-        (void)wormhole_update(ref, key, update_plus1, NULL);
-        break;
-      case 9: case 10: case 11:
+      case 9: case 10:
         (void)wormhole_del(ref, key);
         break;
-      case 12: case 13: case 14: case 15:
+      case 11: case 12:
+        (void)wormhole_update(ref, key, kv_update_plus1, NULL);
+        break;
+      case 13: case 14: case 15:
         (void)wormhole_set(ref, key);
         break;
       default:
@@ -140,7 +142,7 @@ main(int argc, char ** argv)
 
   // generate keys
   nkeys = strtoull(argv[1], NULL, 10);
-  samples = malloc(sizeof(struct kv *) * nkeys);
+  keys = malloc(sizeof(struct kv *) * nkeys);
 
   // gen keys and load (4)
   struct wormhole * const wh = wormhole_create(NULL);
@@ -167,8 +169,8 @@ main(int argc, char ** argv)
 
   // final clean up for valgrind
   for (u64 i = 0; i < nkeys; i++)
-    free(samples[i]);
-  free(samples);
+    free(keys[i]);
+  free(keys);
   wormhole_destroy(wh);
   return 0;
 }
