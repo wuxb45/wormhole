@@ -180,7 +180,7 @@ kv_print(const struct kv * const kv, const char * const cmd, FILE * const out);
 // }}} kv
 
 // kvmap {{{
-typedef void (* kv_update_func)(struct kv * const kv0, void * const priv);
+typedef void (* kv_inplace_func)(struct kv * const kv0, void * const priv);
 
 typedef struct kv * (* kv_alloc_func)(const u64, void * const);
 
@@ -217,7 +217,7 @@ wormhole_probe(struct wormref * const ref, const struct kv * const key);
 wormhole_set(struct wormref * const ref, const struct kv * const kv);
 
   extern bool
-wormhole_update(struct wormref * const ref, const struct kv * const kv0, kv_update_func uf, void * const priv);
+wormhole_inplace(struct wormref * const ref, const struct kv * const kv0, kv_inplace_func uf, void * const priv);
 
   extern bool
 wormhole_del(struct wormref * const ref, const struct kv * const key);
@@ -270,7 +270,7 @@ wormhole_probe_unsafe(struct wormhole * const map, const struct kv * const key);
 wormhole_set_unsafe(struct wormhole * const map, const struct kv * const kv0);
 
   extern bool
-wormhole_update_unsafe(struct wormhole * const map, const struct kv * const kv0, kv_update_func uf, void * const priv);
+wormhole_inplace_unsafe(struct wormhole * const map, const struct kv * const kv0, kv_inplace_func uf, void * const priv);
 
   extern bool
 wormhole_del_unsafe(struct wormhole * const map, const struct kv * const key);

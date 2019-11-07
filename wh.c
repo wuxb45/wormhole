@@ -3202,13 +3202,13 @@ wormhole_set_unsafe(struct wormhole * const map, const struct kv * const kv0)
 }
 // }}} set
 
-// update {{{
+// inplace {{{
   bool
-wormhole_update(struct wormref * const ref, const struct kv * const kv0,
-    kv_update_func uf, void * const priv)
+wormhole_inplace(struct wormref * const ref, const struct kv * const kv0,
+    kv_inplace_func uf, void * const priv)
 {
   struct wormleaf * const leaf = wormhole_jump_leaf_write(ref, kv0);
-  // update
+  // inplace
   const u64 im = wormhole_leaf_match(leaf, kv0);
   if (im < WH_KPN) {
     uf(u64_to_ptr(leaf->eh[im].e3), priv);
@@ -3221,11 +3221,11 @@ wormhole_update(struct wormref * const ref, const struct kv * const kv0,
 }
 
   bool
-wormhole_update_unsafe(struct wormhole * const map, const struct kv * const kv0,
-    kv_update_func uf, void * const priv)
+wormhole_inplace_unsafe(struct wormhole * const map, const struct kv * const kv0,
+    kv_inplace_func uf, void * const priv)
 {
   struct wormleaf * const leaf = wormhole_jump_leaf(map->hmap, kv0);
-  // update
+  // inplace
   const u64 im = wormhole_leaf_match(leaf, kv0);
   if (im < WH_KPN) { // overwrite
     uf(u64_to_ptr(leaf->eh[im].e3), priv);

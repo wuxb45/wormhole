@@ -49,10 +49,10 @@ kv_load_worker(struct wormhole * const wh)
 }
 
   static void
-kv_update_plus1(struct kv * const kv0, void * const priv)
+kv_plus1(struct kv * const kv0, void * const priv)
 {
   (void)priv;
-  // WARNING! the update function should never change struct-kv's metadata and key
+  // WARNING! the inplace function should never change struct-kv's metadata and key
   u64 * pv = kv_vptr(kv0);
   (*pv)++;
 }
@@ -111,7 +111,7 @@ kv_probe_worker(struct wormhole * const wh)
         (void)wormhole_del(ref, key);
         break;
       case 11: case 12:
-        (void)wormhole_update(ref, key, kv_update_plus1, NULL);
+        (void)wormhole_inplace(ref, key, kv_plus1, NULL);
         break;
       case 13: case 14: case 15:
         (void)wormhole_set(ref, key);
