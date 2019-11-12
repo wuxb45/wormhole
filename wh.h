@@ -229,10 +229,16 @@ wormhole_iter_create(struct wormref * const ref);
 wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const key);
 
   extern struct kv *
+wormhole_iter_peek(struct wormhole_iter * const iter, struct kv * const out);
+
+  extern struct kv *
 wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out);
 
   extern void
 wormhole_iter_skip(struct wormhole_iter * const iter, const u64 nr);
+
+  extern bool
+wormhole_iter_inplace(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv);
 
   extern void
 wormhole_iter_destroy(struct wormhole_iter * const iter);
@@ -282,10 +288,16 @@ wormhole_iter_create_unsafe(struct wormhole * const map);
 wormhole_iter_seek_unsafe(struct wormhole_iter * const iter, const struct kv * const key);
 
   extern struct kv *
+wormhole_iter_peek_unsafe(struct wormhole_iter * const iter, struct kv * const out);
+
+  extern struct kv *
 wormhole_iter_next_unsafe(struct wormhole_iter * const iter, struct kv * const out);
 
   extern void
 wormhole_iter_skip_unsafe(struct wormhole_iter * const iter, const u64 nr);
+
+  extern bool
+wormhole_iter_inplace_unsafe(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv);
 
   extern void
 wormhole_iter_destroy_unsafe(struct wormhole_iter * const iter);

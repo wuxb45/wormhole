@@ -6,7 +6,7 @@ This repository maintains a reference implementation of the Wormhole index struc
 The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
 
 ## Highlights:
-* Thread-safety: `get`, `set`, `update`, `del`, `iter-seek`, `iter-next`, etc. are all thread-safe. See `stresstest.c` for more operations.
+* Thread-safety: `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-next`, etc. are all thread-safe. See `stresstest.c` for more operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
 * No background threads or global status. Wormhole uses user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
@@ -95,7 +95,8 @@ and obtains a new `ref` before performing the next index operation.
     // perform index operations with (the new) ref
 
 However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
-A better solution is available if the ref-holder thread can periodically update its quiescent state by call `wormhole_refresh_qstate()`. This method has negligible cost (only two instructions) and does not interfere with other threads.
+A better solution is available if the ref-holder thread can periodically update its quiescent state by call `wormhole_refresh_qstate()`.
+This method has negligible cost (only two instructions) and does not interfere with other threads.
 For example:
 
     // holding a ref
@@ -118,11 +119,41 @@ The thread-unsafe functions don't use the reference (_wormref_). Simply feed it 
     ... // other unsafe operations
     wormhole_destroy(index);
 
-### light-weight GET functions
-`wormhole_get()` returns a full copy of the key-value pair to the user-provided buffer (or malloc-ed if `out == 0`). This can be suboptimal when dealing with long keys and short values.
+### Light-weight GET functions
+`wormhole_get()` returns a full copy of the key-value pair to the user-provided buffer (or malloc-ed if `out == 0`).
+This can be suboptimal when dealing with long keys and short values.
 To minimize copying, the `wormhole_getv` and `wormhole_getu64` functions avoid copying the key.
 
-`wormhole_getu64` returns 0 if the key if not found or the value's length is shorter than 8 bytes. This can be useful if the application logic treats "`value == 0`" as equivalent to "not found".
+`wormhole_getu64` returns 0 if the key if not found or the value's length is shorter than 8 bytes.
+This can be useful if the application logic treats "`value == 0`" as equivalent to "not found".
+
+### In-place update with user-defined function
+`wormhole_inplace` executes a user-defined function on an existing key-value item.
+If the key does not exist, a NULL pointer will be passed to the user-defined function.
+A simple example would be incrementing a counter stored in a key-value pair.
+
+    // user-defined in-place update function
+    void myadd1(struct kv * kv, void * priv) {
+      if (kv != NULL) {
+        assert(kv->vlen >= sizeof(u64));
+        u64 * pvalue = kv_vptr(kv0);
+        (*pvalue)++;
+      }
+    }
+
+    // create the counter
+    u64 initval = 0;
+    struct kv * tmp = kv_create("counter", 7, &initval, sizeof(initval));
+    wormhole_set(ref, tmp);
+    free(tmp);
+
+    // perform +1
+    struct kv * key = kv_create("counter", 7, NULL, 0);
+    wormhole_update(ref, key, myadd1, NULL);
+    free(key);
+
+Note that the user-defined function should only change the value's content, but not its size.
+A similar mechanism is also provided for iterators (`wormhole_iter_inplace`).
 
 ## Memory management
 

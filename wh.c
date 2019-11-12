@@ -1434,11 +1434,11 @@ static const struct kvmap_mm kvmap_mm_default = {
 // wormhole {{{
 
 // def {{{
-#define WH_HMAPINIT_SIZE ((1lu << 14)) // 256k/1MB
+#define WH_HMAPINIT_SIZE ((1lu << 12)) // 10: 16KB/64KB  12: 64KB/256KB  14: 256KB/1MB
 #define WH_SLABMETA_SIZE ((1lu << 21)) // 2MB
 
 #ifndef HEAPCHECKING
-#define WH_SLABLEAF_SIZE ((1lu << 21)) // 1GB; change to 2MB if no 1GB hugepages
+#define WH_SLABLEAF_SIZE ((1lu << 21))
 #else
 #define WH_SLABLEAF_SIZE ((1lu << 21)) // 2MB for valgrind
 #endif
@@ -3574,7 +3574,7 @@ wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const ke
 }
 
   static struct kv *
-wormhole_iter_step(struct wormhole_iter * const iter, struct kv * const out, const bool copy_key)
+wormhole_iter_current(struct wormhole_iter * const iter)
 {
   if (iter->leaf == NULL)
     return NULL;
@@ -3594,30 +3594,51 @@ wormhole_iter_step(struct wormhole_iter * const iter, struct kv * const out, con
     if (next == NULL)
       return NULL;
   }
-  debug_assert(iter->leaf);
+
   debug_assert(iter->next_id < iter->leaf->nr_sorted);
-  if (copy_key) {
-    struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
+  struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
+  return kv;
+}
+
+  struct kv *
+wormhole_iter_peek(struct wormhole_iter * const iter, struct kv * const out)
+{
+  struct kv * const kv = wormhole_iter_current(iter);
+  if (kv) {
     struct kv * const ret = kv_dup2(kv, out);
-    iter->next_id++;
     return ret;
-  } else {
-    iter->next_id++;
-    return NULL;
   }
+  return NULL;
 }
 
   struct kv *
 wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out)
 {
-  return wormhole_iter_step(iter, out, true);
+  struct kv * const kv = wormhole_iter_current(iter);
+  if (kv) {
+    struct kv * const ret = kv_dup2(kv, out);
+    iter->next_id++;
+    return ret;
+  }
+  return NULL;
 }
 
   void
 wormhole_iter_skip(struct wormhole_iter * const iter, const u64 nr)
 {
-  for (u64 i = 0; i < nr; i++)
-    wormhole_iter_step(iter, NULL, false);
+  for (u64 i = 0; i < nr; i++) {
+    if (wormhole_iter_current(iter) == NULL)
+      return;
+    iter->next_id++;
+  }
+}
+
+  bool
+wormhole_iter_inplace(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv)
+{
+  struct kv * const kv = wormhole_iter_current(iter);
+  uf(kv, priv); // call uf even if (kv == NULL)
+  return kv ? true : false;
 }
 
   void
@@ -3672,7 +3693,7 @@ wormhole_iter_seek_unsafe(struct wormhole_iter * const iter, const struct kv * c
 }
 
   static struct kv *
-wormhole_iter_step_unsafe(struct wormhole_iter * const iter, struct kv * const out, const bool copy_key)
+wormhole_iter_current_unsafe(struct wormhole_iter * const iter)
 {
   if (iter->leaf == NULL)
     return NULL;
@@ -3685,30 +3706,51 @@ wormhole_iter_step_unsafe(struct wormhole_iter * const iter, struct kv * const o
     if (next == NULL)
       return NULL;
   }
-  debug_assert(iter->leaf);
+
   debug_assert(iter->next_id < iter->leaf->nr_sorted);
-  if (copy_key) {
-    struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
+  struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
+  return kv;
+}
+
+  struct kv *
+wormhole_iter_peek_unsafe(struct wormhole_iter * const iter, struct kv * const out)
+{
+  struct kv * const kv = wormhole_iter_current_unsafe(iter);
+  if (kv) {
     struct kv * const ret = kv_dup2(kv, out);
-    iter->next_id++;
     return ret;
-  } else {
-    iter->next_id++;
-    return NULL;
   }
+  return NULL;
 }
 
   struct kv *
 wormhole_iter_next_unsafe(struct wormhole_iter * const iter, struct kv * const out)
 {
-  return wormhole_iter_step_unsafe(iter, out, true);
+  struct kv * const kv = wormhole_iter_current_unsafe(iter);
+  if (kv) {
+    struct kv * const ret = kv_dup2(kv, out);
+    iter->next_id++;
+    return ret;
+  }
+  return NULL;
 }
 
   void
 wormhole_iter_skip_unsafe(struct wormhole_iter * const iter, const u64 nr)
 {
-  for (u64 i = 0; i < nr; i++)
-    wormhole_iter_step_unsafe(iter, NULL, false);
+  for (u64 i = 0; i < nr; i++) {
+    if (wormhole_iter_current_unsafe(iter) == NULL)
+      return;
+    iter->next_id++;
+  }
+}
+
+  bool
+wormhole_iter_inplace_unsafe(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv)
+{
+  struct kv * const kv = wormhole_iter_current_unsafe(iter);
+  uf(kv, priv); // call uf even if (kv == NULL)
+  return kv ? true : false;
 }
 
   void
