@@ -35,6 +35,9 @@ time_sec(void);
 
   extern double
 time_diff_sec(const double last);
+
+  extern void
+time_stamp(char * str, const size_t size);
 // }}} timing
 
 // random {{{
