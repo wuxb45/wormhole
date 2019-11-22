@@ -201,8 +201,13 @@ struct kvmap_mm {
 struct wormhole;
 struct wormref;
 
+// the wh created by wormhole_create() can work with all of safe/unsafe operations.
   extern struct wormhole *
 wormhole_create(const struct kvmap_mm * const mm);
+
+// the wh created by whunsafe_create() can only work with the unsafe operations.
+  extern struct wormhole *
+whunsafe_create(const struct kvmap_mm * const mm);
 
   extern struct kv *
 wormhole_get(struct wormref * const ref, const struct kv * const key, struct kv * const out);

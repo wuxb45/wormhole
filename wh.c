@@ -31,9 +31,7 @@
 
 // atomic {{{
 /* C11 atomic types */
-typedef atomic_uint_least16_t   au16;
 typedef atomic_uint_least32_t   au32;
-typedef atomic_uint_least64_t   au64;
 // }}} atomic
 
 // debug {{{
@@ -58,7 +56,10 @@ debug_assert(const bool v);
 * Mathematical
 * Society 68.225 (1999): 249-260.
 */
-static __thread union {__uint128_t v128; u64 v64[2]; } rseed_u128 = {.v64[0] = 4294967291};
+static __thread union {
+  __uint128_t v128;
+  u64 v64[2];
+} rseed_u128 = {.v64 = {4294967291, 1549556881}};
 
   inline u64
 random_u64(void)
@@ -81,16 +82,32 @@ srandom_u64(const u64 seed)
 #define ANSI_X   "\x1b[0m"
 // }}} ansi colors
 
+// bits {{{
+  static inline u64
+bits_p2_up(const u64 v)
+{
+  // clz(0) is undefined
+  return (v > 1) ? (1lu << (64lu - (u64)__builtin_clzl(v - 1lu))) : v;
+}
+
+  static inline u64
+bits_round_up(const u64 v, const u8 power)
+{
+  return (v + (1lu << power) - 1lu) >> power << power;
+}
+// }}} bits
+
 // mm {{{
-#define PGSZ ((UINT64_C(4096)))
 // alloc cache-line aligned address
-  static void *
+  static inline void *
 yalloc(const u64 size)
 {
   void * p;
   const int r = posix_memalign(&p, 64, size);
-  if (r == 0) return p;
-  else return NULL;
+  if (r == 0)
+    return p;
+  else
+    return NULL;
 }
 
   static inline void
@@ -104,28 +121,37 @@ pages_unmap(void * const ptr, const size_t size)
 #endif
 }
 
-  static inline void *
-__pages_alloc(const size_t size, const int flags)
+#ifndef HEAPCHECKING
+  static void *
+pages_do_alloc(const size_t size, const int flags)
 {
   // vi /etc/security/limits.conf
   // * - memlock unlimited
   void * const p = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-  if (p == MAP_FAILED) {
+  if (p == MAP_FAILED)
     return NULL;
-  }
-  mlock(p, size); // ignore if cannot pin memory. see memlock in /etc/security/limits.conf
+
+  static bool use_mlock = true;
+  if (use_mlock)
+    if (mlock(p, size) != 0) {
+      use_mlock = false;
+      fprintf(stderr, "%s: mlock disabled\n", __func__);
+    }
+
   return p;
 }
+#endif
 
   static inline void *
 pages_alloc_1gb(const size_t nr_1gb)
 {
   const u64 sz = nr_1gb << 30;
 #ifndef HEAPCHECKING
-  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (30 << MAP_HUGE_SHIFT));
+  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (30 << MAP_HUGE_SHIFT));
 #else
-  void * const p = xalloc(UINT64_C(1) << 30, sz);
-  if (p) memset(p, 0, sz);
+  void * const p = xalloc(1lu << 21, sz); // Warning: valgrind fails with 30
+  if (p)
+    memset(p, 0, sz);
   return p;
 #endif
 }
@@ -135,10 +161,11 @@ pages_alloc_2mb(const size_t nr_2mb)
 {
   const u64 sz = nr_2mb << 21;
 #ifndef HEAPCHECKING
-  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (21 << MAP_HUGE_SHIFT));
+  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (21 << MAP_HUGE_SHIFT));
 #else
-  void * const p = xalloc(UINT64_C(1) << 21, sz);
-  if (p) memset(p, 0, sz);
+  void * const p = xalloc(1lu << 21, sz);
+  if (p)
+    memset(p, 0, sz);
   return p;
 #endif
 }
@@ -148,10 +175,11 @@ pages_alloc_4kb(const size_t nr_4kb)
 {
   const size_t sz = nr_4kb << 12;
 #ifndef HEAPCHECKING
-  return __pages_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS);
+  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS);
 #else
-  void * const p = xalloc(UINT64_C(1) << 12, sz);
-  if (p) memset(p, 0, sz);
+  void * const p = xalloc(1lu << 12, sz);
+  if (p)
+    memset(p, 0, sz);
   return p;
 #endif
 }
@@ -159,10 +187,10 @@ pages_alloc_4kb(const size_t nr_4kb)
   void *
 pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
 {
+  // 1gb huge page: at least 0.25GB
   if (try_1gb) {
-    const size_t nr_1gb = (size + ((UINT64_C(1) << 30) - UINT64_C(1))) >> 30;
-    // 1gb super huge page: waste < 1/16 or 6.25%
-    if (((nr_1gb << 30) - size) < (size >> 4)) {
+    if (size >= (1lu << 28)) {
+      const size_t nr_1gb = bits_round_up(size, 30) >> 30;
       void * const p1 = pages_alloc_1gb(nr_1gb);
       if (p1) {
         *size_out = nr_1gb << 30;
@@ -171,9 +199,9 @@ pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
     }
   }
 
-  // 2mb huge page: at least 1MB
-  if (size >= (UINT64_C(1) << 20)) {
-    const size_t nr_2mb = (size + ((UINT64_C(1) << 21) - UINT64_C(1))) >> 21;
+  // 2mb huge page: at least 0.5MB
+  if (size >= (1lu << 19)) {
+    const size_t nr_2mb = bits_round_up(size, 21) >> 21;
     void * const p2 = pages_alloc_2mb(nr_2mb);
     if (p2) {
       *size_out = nr_2mb << 21;
@@ -181,23 +209,13 @@ pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
     }
   }
 
-  const size_t nr_4kb = (size + ((UINT64_C(1) << 12) - UINT64_C(1))) >> 12;
+  const size_t nr_4kb = bits_round_up(size, 12) >> 12;
   void * const p3 = pages_alloc_4kb(nr_4kb);
-  if (p3) {
+  if (p3)
     *size_out = nr_4kb << 12;
-  }
   return p3;
 }
 // }}} mm
-
-// bits {{{
-  static inline u64
-bits_p2_up(const u64 v)
-{
-  // clz(0) is undefined
-  return (v > 1) ? (1lu << (64lu - (u64)__builtin_clzl(v - 1lu))) : v;
-}
-// }}} bits
 
 // cpucache {{{
   static inline void
@@ -228,33 +246,36 @@ cpu_prefetchr(const void * const ptr, const int hint)
 // }}} cpucache
 
 // locking {{{
-typedef union {
-  pthread_spinlock_t lock; // size == 4
-  u64 padding;
-} spinlock;
-typedef u64 rwlock;
-
 // spinlock {{{
+typedef union {
+  u64 opaque;
+} spinlock;
+
+static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "lock size");
+
   static inline void
 spinlock_init(spinlock * const lock)
 {
-  pthread_spin_init(&lock->lock, PTHREAD_PROCESS_PRIVATE);
+  pthread_spinlock_t * const p = (typeof(p))lock;
+  pthread_spin_init(p, PTHREAD_PROCESS_PRIVATE);
 }
 
   static inline void
 spinlock_lock(spinlock * const lock)
 {
-  pthread_spin_lock(&lock->lock);
+  pthread_spinlock_t * const p = (typeof(p))lock;
+  pthread_spin_lock(p);
 }
 
   static inline bool
 spinlock_trylock_nr(spinlock * const lock, u16 nr)
 {
+  pthread_spinlock_t * const p = (typeof(p))lock;
 #pragma nounroll
   do {
-    if (0 == pthread_spin_trylock(&lock->lock))
+    if (0 == pthread_spin_trylock(p))
       return true;
-    _mm_pause();
+    cpu_pause();
   } while (nr--);
   return false;
 }
@@ -262,11 +283,15 @@ spinlock_trylock_nr(spinlock * const lock, u16 nr)
   static inline void
 spinlock_unlock(spinlock * const lock)
 {
-  pthread_spin_unlock(&lock->lock);
+  pthread_spinlock_t * const p = (typeof(p))lock;
+  pthread_spin_unlock(p);
 }
 // }}} spinlock
 
 // rwlock {{{
+typedef union {
+  u64 opaque;
+} rwlock;
 typedef au32 lock_t;
 typedef u32 lock_v;
 static_assert(sizeof(lock_t) == sizeof(lock_v), "lock size");
@@ -275,27 +300,15 @@ static_assert(sizeof(lock_t) <= sizeof(rwlock), "lock size");
 #define RWLOCK_WSHIFT ((sizeof(lock_t) * 8 - 1))
 #define RWLOCK_WBIT ((((lock_v)1) << RWLOCK_WSHIFT))
 
-  inline void
+  static inline void
 rwlock_init(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   atomic_store(pvar, 0);
 }
 
-  inline bool
-rwlock_trylock_read(rwlock * const lock)
-{
-  lock_t * const pvar = (typeof(pvar))lock;
-  if ((atomic_fetch_add(pvar, 1) >> RWLOCK_WSHIFT) == 0) {
-    return true;
-  } else {
-    atomic_fetch_sub(pvar, 1);
-    return false;
-  }
-}
-
 // actually nr + 1
-  inline bool
+  static inline bool
 rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
 {
   lock_t * const pvar = (typeof(pvar))lock;
@@ -313,29 +326,14 @@ rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
   return false;
 }
 
-  inline void
-rwlock_lock_read(rwlock * const lock)
-{
-  lock_t * const pvar = (typeof(pvar))lock;
-#pragma nounroll
-  do {
-    if (rwlock_trylock_read(lock))
-      return;
-#pragma nounroll
-    do {
-      cpu_pause();
-    } while (atomic_load(pvar) >> RWLOCK_WSHIFT);
-  } while (true);
-}
-
-  inline void
+  static inline void
 rwlock_unlock_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   atomic_fetch_sub(pvar, 1);
 }
 
-  inline bool
+  static inline bool
 rwlock_trylock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
@@ -344,7 +342,7 @@ rwlock_trylock_write(rwlock * const lock)
 }
 
 // actually nr + 1
-  inline bool
+  static inline bool
 rwlock_trylock_write_nr(rwlock * const lock, u16 nr)
 {
 #pragma nounroll
@@ -356,7 +354,7 @@ rwlock_trylock_write_nr(rwlock * const lock, u16 nr)
   return false;
 }
 
-  inline void
+  static inline void
 rwlock_lock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
@@ -371,14 +369,14 @@ rwlock_lock_write(rwlock * const lock)
   } while (true);
 }
 
-  inline void
+  static inline void
 rwlock_unlock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   atomic_fetch_sub(pvar, RWLOCK_WBIT);
 }
 
-  inline void
+  static inline void
 rwlock_write_to_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
@@ -1678,13 +1676,13 @@ wormhole_alloc_meta(struct slab * const slab, struct wormleaf * const lrmost,
 }
 
   static inline bool
-wormhole_alloc_meta_reserve(struct slab * const slab, const u32 nr)
+wormhole_slab_reserve(struct slab * const slab, const u32 nr)
 {
 #ifdef MALLOCFAIL
   if ((random_u64() & MALLOCFAIL_MASK) == MALLOCFAIL_VAL)
     return false;
 #endif
-  return slab_reserve_unsafe(slab, nr);
+  return slab ? slab_reserve_unsafe(slab, nr) : true;
 }
 
   static inline void
@@ -2211,8 +2209,8 @@ wormhole_hmap_init(struct wormhmap * const hmap, struct wormhole * const map, co
   static bool
 wormhole_create_leaf0(struct wormhole * const map)
 {
-  const bool sr1 = wormhole_alloc_meta_reserve(map->slab_meta[0], 1);
-  const bool sr2 = wormhole_alloc_meta_reserve(map->slab_meta[1], 1);
+  const bool sr1 = wormhole_slab_reserve(map->slab_meta[0], 1);
+  const bool sr2 = wormhole_slab_reserve(map->slab_meta[1], 1);
   if (!(sr1 && sr2))
     return false;
 
@@ -2240,9 +2238,11 @@ wormhole_create_leaf0(struct wormhole * const map)
   const u64 hash32 = CRC32C_SEED;
   // create meta of empty key
   for (u64 i = 0; i < 2; i++) {
-    struct wormmeta * const m0 = wormhole_alloc_meta_keyref(map->slab_meta[i], leaf0, mkey, hash32, 0);
-    debug_assert(m0); // already reserved enough
-    wormhole_hmap_set(&(map->hmap2[i]), m0);
+    if (map->slab_meta[i]) {
+      struct wormmeta * const m0 = wormhole_alloc_meta_keyref(map->slab_meta[i], leaf0, mkey, hash32, 0);
+      debug_assert(m0); // already reserved enough
+      wormhole_hmap_set(&(map->hmap2[i]), m0);
+    }
   }
 
   map->leaf0 = leaf0;
@@ -2250,7 +2250,7 @@ wormhole_create_leaf0(struct wormhole * const map)
 }
 
   struct wormhole *
-wormhole_create(const struct kvmap_mm * const mm)
+wormhole_create_internal(const struct kvmap_mm * const mm, const bool hmap2)
 {
   struct wormhole * const map = yalloc(sizeof(*map));
   if (map == NULL)
@@ -2262,19 +2262,24 @@ wormhole_create(const struct kvmap_mm * const mm)
   // hmap
   if (wormhole_hmap_init(&(map->hmap2[0]), map, 0) == false)
     goto fail_hmap_0;
-  if (wormhole_hmap_init(&(map->hmap2[1]), map, 1) == false)
-    goto fail_hmap_1;
-  map->hmap2[0].sibling = &(map->hmap2[1]);
-  map->hmap2[1].sibling = &(map->hmap2[0]);
+
+  if (hmap2) {
+    if (wormhole_hmap_init(&(map->hmap2[1]), map, 1) == false)
+      goto fail_hmap_1;
+    map->hmap2[0].sibling = &(map->hmap2[1]);
+    map->hmap2[1].sibling = &(map->hmap2[0]);
+  }
 
   // slabs
   map->slab_meta[0] = slab_create(sizeof(struct wormmeta), WH_SLABMETA_SIZE);
   if (map->slab_meta[0] == NULL)
     goto fail_slab_0;
 
-  map->slab_meta[1] = slab_create(sizeof(struct wormmeta), WH_SLABMETA_SIZE);
-  if (map->slab_meta[1] == NULL)
-    goto fail_slab_1;
+  if (hmap2) {
+    map->slab_meta[1] = slab_create(sizeof(struct wormmeta), WH_SLABMETA_SIZE);
+    if (map->slab_meta[1] == NULL)
+      goto fail_slab_1;
+  }
 
   map->slab_leaf = slab_create(sizeof(struct wormleaf), WH_SLABLEAF_SIZE);
   if (map->slab_leaf == NULL)
@@ -2294,20 +2299,38 @@ wormhole_create(const struct kvmap_mm * const mm)
   return map;
 
 fail_leaf0:
-  qsbr_destroy(map->qsbr);
+  if (map->qsbr)
+    qsbr_destroy(map->qsbr);
 fail_qsbr:
-  slab_destroy(map->slab_leaf);
+  if (map->slab_leaf)
+    slab_destroy(map->slab_leaf);
 fail_slab_l:
-  slab_destroy(map->slab_meta[1]);
+  if (map->slab_meta[1])
+    slab_destroy(map->slab_meta[1]);
 fail_slab_1:
-  slab_destroy(map->slab_meta[0]);
+  if (map->slab_meta[0])
+    slab_destroy(map->slab_meta[0]);
 fail_slab_0:
-  pages_unmap(map->hmap2[1].pmap, map->hmap2[1].msize);
+  if (map->hmap2[1].pmap)
+    pages_unmap(map->hmap2[1].pmap, map->hmap2[1].msize);
 fail_hmap_1:
-  pages_unmap(map->hmap2[0].pmap, map->hmap2[0].msize);
+  if (map->hmap2[0].pmap)
+    pages_unmap(map->hmap2[0].pmap, map->hmap2[0].msize);
 fail_hmap_0:
   free(map);
   return NULL;
+}
+
+  struct wormhole *
+wormhole_create(const struct kvmap_mm * const mm)
+{
+  return wormhole_create_internal(mm, true);
+}
+
+  struct wormhole *
+whunsafe_create(const struct kvmap_mm * const mm)
+{
+  return wormhole_create_internal(mm, false);
 }
 // }}} create
 
@@ -3142,6 +3165,8 @@ wormhole_split_meta_one(struct wormhmap * const hmap, struct kv * const mkey,
 wormhole_split_meta_hmap(struct wormhmap * const hmap, struct wormleaf * const leaf,
     struct kv * const mkey, struct kv * const mkey2)
 {
+  if (hmap == NULL)
+    return;
   const struct kv * const anchor = leaf->anchor;
   // save mkey metadata
   const u64 mhash = mkey->hash;
@@ -3247,8 +3272,8 @@ wormhole_split_meta_ref(struct wormref * const ref, struct wormleaf * const leaf
     ref->qstate = (u64)(map->hmap);
 
   // check slab reserve
-  const bool sr1 = wormhole_alloc_meta_reserve(map->slab_meta[0], mkey->klen);
-  const bool sr2 = wormhole_alloc_meta_reserve(map->slab_meta[1], mkey->klen);
+  const bool sr1 = wormhole_slab_reserve(map->slab_meta[0], mkey->klen);
+  const bool sr2 = wormhole_slab_reserve(map->slab_meta[1], mkey->klen);
   if (!(sr1 && sr2)) {
     rwlock_unlock_write(&(map->metalock));
     wormhole_free_mkey(mkey);
@@ -3357,8 +3382,8 @@ wormhole_split_meta_unsafe(struct wormhole * const map, struct wormleaf * const 
     }
   }
 
-  const bool sr1 = wormhole_alloc_meta_reserve(map->slab_meta[0], mkey->klen);
-  const bool sr2 = wormhole_alloc_meta_reserve(map->slab_meta[1], mkey->klen);
+  const bool sr1 = wormhole_slab_reserve(map->slab_meta[0], mkey->klen);
+  const bool sr2 = wormhole_slab_reserve(map->slab_meta[1], mkey->klen);
   if (!(sr1 && sr2)) {
     rwlock_unlock_write(&(map->metalock));
     wormhole_free_mkey(mkey);
@@ -3371,8 +3396,9 @@ wormhole_split_meta_unsafe(struct wormhole * const map, struct wormleaf * const 
   if (leaf2->next)
     leaf2->next->prev = leaf2;
 
-  wormhole_split_meta_hmap(map->hmap->sibling, leaf2, mkey, mkey2);
   wormhole_split_meta_hmap(map->hmap, leaf2, mkey, mkey2);
+  if (map->hmap->sibling)
+    wormhole_split_meta_hmap(map->hmap->sibling, leaf2, mkey, mkey2);
   if (mkey->refcnt == 0) // this is possible
     wormhole_free_mkey(mkey);
   if (mkey2 && (mkey2->refcnt == 0)) // this is possible
@@ -3681,8 +3707,9 @@ wormhole_merge_unsafe(struct wormhole * const map, struct wormleaf * const leaf1
   leaf1->next = leaf2->next;
   if (leaf2->next)
     leaf2->next->prev = leaf1;
-  wormhole_merge_meta_hmap(hmap0->sibling, leaf2, pbuf);
   wormhole_merge_meta_hmap(hmap0, leaf2, pbuf);
+  if (hmap0->sibling)
+    wormhole_merge_meta_hmap(hmap0->sibling, leaf2, pbuf);
   wormhole_free_akey(leaf2->anchor);
   slab_free(map->slab_leaf, leaf2);
   wormhole_free_mkey(pbuf);
@@ -3993,6 +4020,8 @@ wormhole_clean1(struct wormhole * const map)
 {
   // meta
   for (u64 x = 0; x < 2; x++) {
+    if (map->hmap2[x].pmap == NULL)
+      continue;
     const u64 nr_slots = map->hmap2[x].mask + 1;
     for (u64 s = 0; s < nr_slots; s++) {
       struct kvbucket * const slot = &(map->hmap2[x].pmap[s]);
@@ -4035,11 +4064,15 @@ wormhole_destroy(struct wormhole * const map)
   //wormhole_verify(map);
   wormhole_clean1(map);
   for (u64 x = 0; x < 2; x++)
-    pages_unmap(map->hmap2[x].pmap, map->hmap2[x].msize);
-  qsbr_destroy(map->qsbr);
-  slab_destroy(map->slab_meta[0]);
-  slab_destroy(map->slab_meta[1]);
-  slab_destroy(map->slab_leaf);
+    if (map->hmap2[x].pmap)
+      pages_unmap(map->hmap2[x].pmap, map->hmap2[x].msize);
+  if (map->qsbr)
+    qsbr_destroy(map->qsbr);
+  for (u64 x = 0; x < 2; x++)
+    if (map->slab_meta[x])
+      slab_destroy(map->slab_meta[x]);
+  if (map->slab_leaf)
+    slab_destroy(map->slab_leaf);
   free(map);
 }
 // }}} misc
