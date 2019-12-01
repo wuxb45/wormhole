@@ -178,6 +178,16 @@ A few macros in `wh.c` can be tuned.
 * `WH_KPN` is "Keys Per (leaf-)Node". Change it to 256 can increase search speed by roughly 10% but slows down internal split and merge operations (not every insertion/deletion). The default is 128.
 * `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU. The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n. The defaults are set to 38 and 8, respectively. This QSBR implementation uses sharding so `wormhole_ref()` will be blocked (busy-waiting) if the target shard is full.
 
+## Limitations
+
+### Key Patterns
+The Wormhole index works well with real-world keys.
+A **split** operation may fail with one of the following (almost impossible) conditions:
+* The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit). Split will fail if all cut-points in the target leaf node require longer anchor-keys. In such case, at least **129** (`WH_KPN + 1`) keys must share a common-prefix of 65535+ bytes.
+* Two anchor-keys cannot be identical after removing their trailing zeroes. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeroes (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeroes), the split will fail.
+
+### Memory Allocation
+Insertions can also fail if there is not enough memory. The current implementation can safely return after any failed memory allocation, except for hash-table expansion (resizing). On memory-allocation failure, the expansion function will block and wait for available memory to proceed. In the future, this behavior will be changed to directly return with a failure.
 
 ## Performance
 Some benchmarking results with some real-world datasets: See [this](https://github.com/wuxb45/wormhole/issues/5) page for more information.
