@@ -6,10 +6,10 @@ This repository maintains a reference implementation of the Wormhole index struc
 The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
 
 ## Highlights:
-* Thread-safety: `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-next`, etc. are all thread-safe. See `stresstest.c` for more operations.
+* Thread-safety: all operations, including `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-next`, etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
-* No background threads or global status. Wormhole uses user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
+* No background threads or global status. Wormhole uses a mix of user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
 
 # Build
 
@@ -20,7 +20,7 @@ To build:
 
     $ make
 
-Alternatively, you may use `O=0g` to enable debug info and disable optimizations (very slow):
+Alternatively, you may use `O=0g` to enable debug info and disable optimizations:
 
     $ O=0g make
 
@@ -184,7 +184,7 @@ A few macros in `wh.c` can be tuned.
 The Wormhole index works well with real-world keys.
 A **split** operation may fail with one of the following (almost impossible) conditions:
 * The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit). Split will fail if all cut-points in the target leaf node require longer anchor-keys. In such case, at least **129** (`WH_KPN + 1`) keys must share a common-prefix of 65535+ bytes.
-* Two anchor-keys cannot be identical after removing their trailing zeroes. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeroes (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeroes), the split will fail.
+* Two anchor-keys cannot be identical after removing their trailing zeros. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeros), the split will fail.
 
 ### Memory Allocation
 Insertions can also fail if there is not enough memory. The current implementation can safely return after any failed memory allocation, except for hash-table expansion (resizing). On memory-allocation failure, the expansion function will block and wait for available memory to proceed. In the future, this behavior will be changed to directly return with a failure.
