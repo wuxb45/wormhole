@@ -45,6 +45,12 @@ debug_assert(const bool v);
 // }}} debug
 
 // random {{{
+  inline u64
+mhash64(const u64 v)
+{
+  return v * 11400714819323198485lu;
+}
+
 // Lehmer's generator is 2x faster than xorshift
 /**
 * D. H. Lehmer, Mathematical methods in large-scale computing units.
@@ -943,10 +949,14 @@ crc32c_extend(const u32 lo)
 // }}} crc32c
 
 // qsbr {{{
-#define QSBR_STATES_NR ((38)) // 3*8-2 or 5*8-2 or 7*8-2
-#define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1lu)
-#define QSBR_SHARDS_NR  ((8))
+#define QSBR_STATES_NR ((22)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
+#define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1)
+#define QSBR_SHARDS_BITS ((3))
+#define QSBR_SHARDS_NR  (((1lu) << QSBR_SHARDS_BITS))
 #define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARDS_NR))
+#define QSBR_MHASH_SHIFT ((64 - QSBR_SHARDS_BITS))
+
+// Quiescent-State-Based Reclamation RCU
 struct qsbr {
   volatile u64 target;
   u64 padding0[7];
@@ -958,7 +968,7 @@ struct qsbr {
   volatile u64 * wait_ptrs[QSBR_CAPACITY];
 };
 
-  static inline struct qsbr *
+  struct qsbr *
 qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
@@ -971,12 +981,12 @@ qsbr_create(void)
   static inline struct qshard *
 qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
 {
-  const u32 sid = _mm_crc32_u64(0xDEADBEEFu, (u64)ptr) % QSBR_SHARDS_NR;
+  const u32 sid = mhash64((u64)ptr) >> QSBR_MHASH_SHIFT;
   debug_assert(sid < QSBR_SHARDS_NR);
   return &(q->shards[sid]);
 }
 
-  static inline bool
+  bool
 qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
 {
   debug_assert(ptr);
@@ -997,15 +1007,16 @@ qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
   return false;
 }
 
-  static inline void
+  void
 qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 {
   if (ptr == NULL)
     return;
   struct qshard * const shard = qsbr_shard(q, ptr);
+#pragma nounroll
   while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
     (*ptr) = q->target;
-    _mm_pause();
+    cpu_pause();
   }
 
   cpu_cfence();
@@ -1028,7 +1039,7 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 }
 
 // waiters needs external synchronization
-  static inline void
+  void
 qsbr_wait(struct qsbr * const q, const u64 target)
 {
   q->target = target;
@@ -1067,10 +1078,11 @@ qsbr_wait(struct qsbr * const q, const u64 target)
     spinlock_unlock(&(q->shards[i].lock));
 }
 
-  static inline void
+  void
 qsbr_destroy(struct qsbr * const q)
 {
-  free(q);
+  if (q)
+    free(q);
 }
 #undef QSBR_STATES_NR
 #undef QSBR_BITMAP_NR
