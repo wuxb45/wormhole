@@ -106,14 +106,14 @@ For example:
     // perform index operations with ref
 
 ### The thread-unsafe API
-A set of *thread-unsafe* functions are also provided. See the functions with suffix `_unsafe`.
+A set of *thread-unsafe* functions are also provided. See the functions with _prefix_ `whunsafe`.
 The thread-unsafe functions don't use the reference (_wormref_). Simply feed it with the pointer to the wormhole index:
 
-    index = wormhole_create(NULL);
+    index = whunsafe_create(NULL);
     for (...) {
-      wormhole_set_unsafe(index, ...);
-      wormhole_get_unsafe(index, ...);
-      wormhole_del_unsafe(index, ...);
+      whunsafe_set(index, ...);
+      whunsafe_get(index, ...);
+      whunsafe_del(index, ...);
       ... // other unsafe operations
     }
     ... // other unsafe operations

@@ -267,48 +267,49 @@ wormhole_clean(struct wormhole * const map);
 wormhole_destroy(struct wormhole * const map);
 
 // unsafe API
-
   extern struct kv *
-wormhole_get_unsafe(struct wormhole * const map, const struct kv * const key, struct kv * const out);
+whunsafe_get(struct wormhole * const map, const struct kv * const key, struct kv * const out);
 
   extern struct sbuf *
-wormhole_getv_unsafe(struct wormhole * const map, const struct kv * const key, struct sbuf * const out);
+whunsafe_getv(struct wormhole * const map, const struct kv * const key, struct sbuf * const out);
 
   extern void *
-wormhole_getp_unsafe(struct wormhole * const map, const struct kv * const key);
+whunsafe_getp(struct wormhole * const map, const struct kv * const key);
 
   extern bool
-wormhole_probe_unsafe(struct wormhole * const map, const struct kv * const key);
+whunsafe_probe(struct wormhole * const map, const struct kv * const key);
 
   extern bool
-wormhole_set_unsafe(struct wormhole * const map, const struct kv * const kv0);
+whunsafe_set(struct wormhole * const map, const struct kv * const kv);
 
   extern bool
-wormhole_inplace_unsafe(struct wormhole * const map, const struct kv * const kv0, kv_inplace_func uf, void * const priv);
+whunsafe_inplace(struct wormhole * const map, const struct kv * const key,
+    kv_inplace_func uf, void * const priv);
 
   extern bool
-wormhole_del_unsafe(struct wormhole * const map, const struct kv * const key);
+whunsafe_del(struct wormhole * const map, const struct kv * const key);
 
   extern struct wormhole_iter *
-wormhole_iter_create_unsafe(struct wormhole * const map);
+whunsafe_iter_create(struct wormhole * const map);
 
   extern void
-wormhole_iter_seek_unsafe(struct wormhole_iter * const iter, const struct kv * const key);
+whunsafe_iter_seek(struct wormhole_iter * const iter, const struct kv * const key);
 
   extern struct kv *
-wormhole_iter_peek_unsafe(struct wormhole_iter * const iter, struct kv * const out);
+whunsafe_iter_peek(struct wormhole_iter * const iter, struct kv * const out);
 
   extern struct kv *
-wormhole_iter_next_unsafe(struct wormhole_iter * const iter, struct kv * const out);
+whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out);
 
   extern void
-wormhole_iter_skip_unsafe(struct wormhole_iter * const iter, const u64 nr);
+whunsafe_iter_skip(struct wormhole_iter * const iter, const u64 nr);
 
   extern bool
-wormhole_iter_inplace_unsafe(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv);
+whunsafe_iter_inplace(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv);
 
   extern void
-wormhole_iter_destroy_unsafe(struct wormhole_iter * const iter);
+whunsafe_iter_destroy(struct wormhole_iter * const iter);
+
 // }}} wormhole
 
 #ifdef __cplusplus
