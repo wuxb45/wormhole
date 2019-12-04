@@ -95,8 +95,8 @@ and obtains a new `ref` before performing the next index operation.
     // perform index operations with (the new) ref
 
 However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
-A better solution is available if the ref-holder thread can periodically update its quiescent state by call `wormhole_refresh_qstate()`.
-This method has negligible cost (only two instructions) and does not interfere with other threads.
+A better solution can be used if the ref-holder thread can periodically update its quiescent state by calling `wormhole_refresh_qstate()`.
+This method has negligible cost (only two instructions).
 For example:
 
     // holding a ref
@@ -142,18 +142,26 @@ A simple example would be incrementing a counter stored in a key-value pair.
     }
 
     // create the counter
-    u64 initval = 0;
-    struct kv * tmp = kv_create("counter", 7, &initval, sizeof(initval));
+    u64 zero = 0;
+    struct kv * tmp = kv_create("counter", 7, &zero, 8); // malloc-ed
     wormhole_set(ref, tmp);
     free(tmp);
 
     // perform +1
-    struct kv * key = kv_create("counter", 7, NULL, 0);
+    struct kv * key = kv_create("counter", 7, NULL, 0); // malloc-ed
     wormhole_update(ref, key, myadd1, NULL);
     free(key);
 
-Note that the user-defined function should only change the value's content, but not its size.
+Note that the user-defined function should ONLY change the value's content, and nothing else.
+Otherwise, the index can be corrupted.
 A similar mechanism is also provided for iterators (`wormhole_iter_inplace`).
+
+### Iterator
+The `wormhole_iter_{seek,peek,skip,next,inplace}` functions provide range-search functionalities.
+If the search key does not exist, the `seek` operation will put the cursor on the item that is greater than the search-key.
+`next` will return the item under the current cursor and move the cursor forward. `peek` is similar but does not move the cursor. For example, with keys `{1,3,5}`, `seek(2); r = next()` will see `r == 3`.
+
+Currently Wormhole does not provide `seek_for_less_equal()` and `prev()` for backward scanning. This feature will be added in the future.
 
 ## Memory management
 
@@ -172,19 +180,21 @@ but not the other objects in Wormhole, such as hash table and tree nodes.
 Wormhole uses hugepages when available. To reserve some hugepages in Linux (10000 * 2MB):
 
     # echo 10000 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+
+
 ## Tuning
 A few macros in `wh.c` can be tuned.
-* `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation. If the system has 1GB hugepages available, `WH_SLABLEAF_SIZE` be set to `((1lu << 30))` to utilize those 1GB hugepages. The default is `((1lu << 21))` (2MB slabs).
-* `WH_KPN` is "Keys Per (leaf-)Node". Change it to 256 can increase search speed by roughly 10% but slows down internal split and merge operations (not every insertion/deletion). The default is 128.
-* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU. The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n. The defaults are set to 38 and 8, respectively. This QSBR implementation uses sharding so `wormhole_ref()` will be blocked (busy-waiting) if the target shard is full.
+* `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation.  The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize those 1GB hugepages.
+* `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128. Setting it to 256 can increase search speed by roughly 10% but slows down internal split/merge operations (but not every insertion/deletion).
+* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU. The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n. The defaults are set to 38 and 8, respectively. This QSBR implementation uses sharding so `wormhole_ref()` will block (busy-waiting) if the target shard is full.
 
 ## Limitations
 
 ### Key Patterns
 The Wormhole index works well with real-world keys.
 A **split** operation may fail with one of the following (almost impossible) conditions:
-* The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit). Split will fail if all cut-points in the target leaf node require longer anchor-keys. In such case, at least **129** (`WH_KPN + 1`) keys must share a common-prefix of 65535+ bytes.
-* Two anchor-keys cannot be identical after removing their trailing zeros. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeros), the split will fail.
+* The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit). Split will fail if all cut-points in the target leaf node require longer anchor-keys. In such case, at least **129** (`WH_KPN + 1`) keys must share a common prefix of 65535+ bytes.
+* Two anchor-keys cannot be identical after removing their trailing zeros. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (while these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeros), the split will fail.
 
 ### Memory Allocation
 Insertions can also fail if there is not enough memory. The current implementation can safely return after any failed memory allocation, except for hash-table expansion (resizing). On memory-allocation failure, the expansion function will block and wait for available memory to proceed. In the future, this behavior will be changed to directly return with a failure.
