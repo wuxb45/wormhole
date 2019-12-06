@@ -5,6 +5,8 @@ The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered 
 This repository maintains a reference implementation of the Wormhole index structure on x86\_64 Linux with SSE 4.2.
 The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
 
+Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
+
 ## Highlights:
 * Thread-safety: all operations, including `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-next`, etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
