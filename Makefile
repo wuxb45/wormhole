@@ -68,7 +68,14 @@ CCC ?= clang
 CSTD = -std=gnu11
 XCC ?= clang++
 XSTD = -std=gnu++17
+
+ISA := $(shell uname -m)
+ifeq ($(ISA),aarch64) # "native" does not work for clang@aarch64
+ARCH ?= armv8-a+crc
+else
 ARCH ?= native
+endif
+
 TUNE ?= native
 
 NBI += memcpy memmove memcmp
