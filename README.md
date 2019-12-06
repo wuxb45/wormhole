@@ -13,8 +13,10 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 
 # Build
 
+## x86\_64
 Wormhole was developed & tested on x86\_64 Linux.
-Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ CCC=gcc make`).
+Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ make CCC=gcc`).
+On our testbed Clang usually produces faster code.
 
 To build:
 
@@ -22,10 +24,17 @@ To build:
 
 Alternatively, you may use `O=0g` to enable debug info and disable optimizations:
 
-    $ O=0g make
+    $ make O=0g
 
 Read `Makefile` for options on optimization and debugging levels (O=).
 
+## ARM64 (experimental)
+
+Wormhole now builds on 64-bit ARM (aarch64). The currect implementation requires NEON SIMD and the `crc` features on the target CPU. The Clang in our testbed (clang-8, Ubuntu 18.04) does not support `-march=native` so the target needs to be explicitly specified.
+
+    $ make CCC=clang-8 ARCH=armv8-a+crc
+
+## Sample programs
 To run the demo code:
 
     $ ./demo1.out <a text file>
@@ -36,9 +45,7 @@ Each line in the text file becomes a key. Duplicates are allowed. You may use "w
 It generates six-word keys based on a word list (words.txt). See `sprintf` in `concbench.c`.
 
     $ wget https://github.com/dwyl/english-words/raw/master/words.txt
-
     $ ./concbench.out words.txt 10000000 4
-
     $ numactl -N 0 ./concbench.out words.txt 10000000 4
 
 `stresstest.out` tests all thread-safe operations.
@@ -163,7 +170,7 @@ If the search key does not exist, the `seek` operation will put the cursor on th
 
 Currently Wormhole does not provide `seek_for_less_equal()` and `prev()` for backward scanning. This feature will be added in the future.
 
-## Memory management
+# Memory management
 
 Wormhole manages all the key-value data internally and only copies to or from a user-supplied
 buffer (a `struct kv` object).
@@ -176,30 +183,30 @@ The memory allocator for the internal key-value data can be customized when the 
 The allocator will _only_ be used for allocating the internal key-value data (the `struct kv` objects),
 but not the other objects in Wormhole, such as hash table and tree nodes.
 
-### Hugepages
+## Hugepages
 Wormhole uses hugepages when available. To reserve some hugepages in Linux (10000 * 2MB):
 
     # echo 10000 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 
 
-## Tuning
+# Tuning
 A few macros in `wh.c` can be tuned.
 * `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation.  The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize those 1GB hugepages.
 * `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128. Setting it to 256 can increase search speed by roughly 10% but slows down internal split/merge operations (but not every insertion/deletion).
 * `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU. The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n. The defaults are set to 38 and 8, respectively. This QSBR implementation uses sharding so `wormhole_ref()` will block (busy-waiting) if the target shard is full.
 
-## Limitations
+# Limitations
 
-### Key Patterns
+## Key Patterns
 The Wormhole index works well with real-world keys.
 A **split** operation may fail with one of the following (almost impossible) conditions:
 * The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit). Split will fail if all cut-points in the target leaf node require longer anchor-keys. In such case, at least **129** (`WH_KPN + 1`) keys must share a common prefix of 65535+ bytes.
 * Two anchor-keys cannot be identical after removing their trailing zeros. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (while these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeros), the split will fail.
 
-### Memory Allocation
+## Memory Allocation
 Insertions can also fail if there is not enough memory. The current implementation can safely return after any failed memory allocation, except for hash-table expansion (resizing). On memory-allocation failure, the expansion function will block and wait for available memory to proceed. In the future, this behavior will be changed to returning with an insertion failure.
 
-## Performance
+# Performance
 Some benchmarking results with some real-world datasets: See [this](https://github.com/wuxb45/wormhole/issues/5) page for more information.
 
 ![Concurrent GET](https://user-images.githubusercontent.com/564235/65991356-d300b180-e452-11e9-9103-f0f7e8dae20b.png)
