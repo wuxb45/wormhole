@@ -13,7 +13,6 @@
 #include <stdatomic.h>
 #include <byteswap.h>
 #include <errno.h>
-#include <x86intrin.h>
 #include <assert.h>
 // POSIX headers
 #include <unistd.h>
@@ -21,6 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#elif defined(__aarch64__)
+#include <arm_acle.h>
+#include <arm_neon.h>
+#endif
 
 // Linux headers
 #include <sys/mman.h>
@@ -32,8 +38,54 @@
 // types {{{
 /* C11 atomic types */
 typedef atomic_uint_least32_t   au32;
-typedef __m128i                 m128;
+#if defined(__x86_64__)
+typedef __m128i m128;
+#elif defined(__aarch64__)
+typedef uint16x8_t m128;
+#endif
 // }}} types
+
+// crc32c {{{
+  inline u32
+crc32c_u8(const u32 crc, const u8 v)
+{
+#if defined(__x86_64__)
+  return _mm_crc32_u8(crc, v);
+#elif defined(__aarch64__)
+  return __crc32cb(crc, v);
+#endif
+}
+
+  inline u32
+crc32c_u16(const u32 crc, const u16 v)
+{
+#if defined(__x86_64__)
+  return _mm_crc32_u16(crc, v);
+#elif defined(__aarch64__)
+  return __crc32ch(crc, v);
+#endif
+}
+
+  inline u32
+crc32c_u32(const u32 crc, const u32 v)
+{
+#if defined(__x86_64__)
+  return _mm_crc32_u32(crc, v);
+#elif defined(__aarch64__)
+  return __crc32cw(crc, v);
+#endif
+}
+
+  inline u32
+crc32c_u64(const u32 crc, const u64 v)
+{
+#if defined(__x86_64__)
+  return _mm_crc32_u64(crc, v);
+#elif defined(__aarch64__)
+  return __crc32cd(crc, v);
+#endif
+}
+// }}} crc32c
 
 // debug {{{
 #ifndef NDEBUG
@@ -228,7 +280,9 @@ pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
   static inline void
 cpu_pause(void)
 {
+#if defined(__x86_64__)
   _mm_pause();
+#endif
 }
 
 // compiler fence
@@ -397,12 +451,6 @@ rwlock_write_to_read(rwlock * const lock)
 // }}} locking
 
 // timing {{{
-  inline u64
-rdtsc(void)
-{
-  return _rdtsc();
-}
-
   inline u64
 time_nsec(void)
 {
@@ -882,19 +930,20 @@ slab_destroy(struct slab * const slab)
 
 // crc32c {{{
 #define CRC32C_SEED ((0xDEADBEEFu))
+// for crc of 1 to 3 bytes
   static inline u32
 crc32c_inc_short_nz(const u8 * buf, size_t nr, u32 crc)
 {
   // nr == 1
-  crc = _mm_crc32_u8(crc, buf[0]);
+  crc = crc32c_u8(crc, buf[0]);
   if (nr == 1)
     return crc;
 
-  crc = _mm_crc32_u8(crc, buf[1]);
-  return (nr == 2) ? crc : _mm_crc32_u8(crc, buf[2]);
+  crc = crc32c_u8(crc, buf[1]);
+  return (nr == 2) ? crc : crc32c_u8(crc, buf[2]);
 }
 
-// for crc less than 3 bytes
+// for crc of 0 to 3 bytes
   static inline u32
 crc32c_inc_short(const u8 * buf, size_t nr, u32 crc)
 {
@@ -908,12 +957,12 @@ crc32c_inc_x4(const u8 * buf, size_t nr, u32 crc)
   debug_assert((nr & 3) == 0);
 #pragma nounroll
   while (nr >= sizeof(u64)) {
-    crc = _mm_crc32_u64(crc, *((u64*)buf));
+    crc = crc32c_u64(crc, *((u64*)buf));
     nr -= sizeof(u64);
     buf += sizeof(u64);
   }
   if (nr)
-    crc = _mm_crc32_u32(crc, *((u32*)buf));
+    crc = crc32c_u32(crc, *((u32*)buf));
   return crc;
 }
 
@@ -922,12 +971,12 @@ crc32c_inc(const u8 * buf, size_t nr, u32 crc)
 {
 #pragma nounroll
   while (nr >= sizeof(u64)) {
-    crc = _mm_crc32_u64(crc, *((u64*)buf));
+    crc = crc32c_u64(crc, *((u64*)buf));
     nr -= sizeof(u64);
     buf += sizeof(u64);
   }
   if (nr >= sizeof(u32)) {
-    crc = _mm_crc32_u32(crc, *((u32*)buf));
+    crc = crc32c_u32(crc, *((u32*)buf));
     nr -= sizeof(u32);
     buf += sizeof(u32);
   }
@@ -1129,8 +1178,10 @@ kv_refill(struct kv * const kv, const void * const key, const u32 klen,
   debug_assert(kv);
   kv->klen = klen;
   kv->vlen = vlen;
-  memcpy(&(kv->kv[0]), key, klen);
-  memcpy(&(kv->kv[klen]), value, vlen);
+  if (key && klen)
+    memcpy(&(kv->kv[0]), key, klen);
+  if (value && vlen)
+    memcpy(&(kv->kv[klen]), value, vlen);
   kv_update_hash(kv);
 }
 
@@ -1150,7 +1201,8 @@ kv_refill_str_u64(struct kv * const kv, const char * const key, const u64 value)
 kv_create(const void * const key, const u32 klen, const void * const value, const u32 vlen)
 {
   struct kv * const kv = malloc(sizeof(*kv) + klen + vlen);
-  kv_refill(kv, key, klen, value, vlen);
+  if (kv)
+    kv_refill(kv, key, klen, value, vlen);
   return kv;
 }
 
@@ -1193,7 +1245,8 @@ kv_dup2(const struct kv * const from, struct kv * const to)
     return NULL;
   const size_t sz = kv_size(from);
   struct kv * const new = to ? to : malloc(sz);
-  memcpy(new, from, sz);
+  if (new)
+    memcpy(new, from, sz);
   return new;
 }
 
@@ -1204,8 +1257,10 @@ kv_dup2_key(const struct kv * const from, struct kv * const to)
     return NULL;
   const size_t sz = key_size(from);
   struct kv * const new = to ? to : malloc(sz);
-  memcpy(new, from, sz);
-  new->vlen = 0;
+  if (new) {
+    memcpy(new, from, sz);
+    new->vlen = 0;
+  }
   return new;
 }
 
@@ -1232,8 +1287,10 @@ kv_dup2_sbuf(const struct kv * const from, struct sbuf * const to)
     return NULL;
   const size_t sz = sizeof(*to) + from->vlen;
   struct sbuf * const new = to ? to : malloc(sz);
-  new->len = from->vlen;
-  memcpy(new->buf, from->kv + from->klen, from->vlen);
+  if (new) {
+    new->len = from->vlen;
+    memcpy(new->buf, from->kv + from->klen, from->vlen);
+  }
   return new;
 }
 
@@ -1252,16 +1309,22 @@ kv_retire_free(struct kv * const kv, void * const priv)
 }
 
 // key1 and key2 must be valid ptr
+// kv: key1 is the search key; key2 is the index key that is often not in the cache;
   inline bool
 kv_keymatch(const struct kv * const key1, const struct kv * const key2)
 {
-  return (key1->hash == key2->hash) && (key1->klen == key2->klen) && (!memcmp(key1->kv, key2->kv, key1->klen));
+  //cpu_prefetchr(((u8 *)key2) + 64, 0);
+  //return (key1->hash == key2->hash)
+  //  && (key1->klen == key2->klen)
+  //  && (!memcmp(key1->kv, key2->kv, key1->klen));
+  return (key1->klen == key2->klen) && (!memcmp(key1->kv, key2->kv, key1->klen));
 }
 
   inline bool
 kv_fullmatch(const struct kv * const kv1, const struct kv * const kv2)
 {
-  return (kv1->kvlen == kv2->kvlen) && (!memcmp(kv1, kv2, sizeof(*kv1) + kv1->klen + kv1->vlen));
+  return (kv1->kvlen == kv2->kvlen)
+    && (!memcmp(kv1, kv2, sizeof(*kv1) + kv1->klen + kv1->vlen));
 }
 
   inline int
@@ -1271,15 +1334,15 @@ kv_keycompare(const struct kv * const kv1, const struct kv * const kv2)
   debug_assert(kv2);
   const u32 len = kv1->klen < kv2->klen ? kv1->klen : kv2->klen;
   const int cmp = memcmp(kv1->kv, kv2->kv, (size_t)len);
-  if (cmp == 0) {
+  if (cmp != 0) {
+    return cmp;
+  } else {
     if (kv1->klen < kv2->klen)
       return -1;
     else if (kv1->klen > kv2->klen)
       return 1;
     else
       return 0;
-  } else {
-    return cmp;
   }
 }
 
@@ -1323,36 +1386,37 @@ kv_kptr_c(const struct kv * const kv)
 }
 
 // return the length of longest common prefix of the two keys
-  static inline u32
+  u32
 kv_key_lcp(const struct kv * const key1, const struct kv * const key2)
 {
   const u32 max = (key1->klen < key2->klen) ? key1->klen : key2->klen;
-  const u32 max128 = max & (~0xfu);
   u32 clen = 0;
   const u8 * p1 = key1->kv;
   const u8 * p2 = key2->kv;
-  // inc by 4
-  while (clen < max128) {
-    const __m128i cmp = _mm_cmpeq_epi8(_mm_load_si128((__m128i *)p1), _mm_load_si128((__m128i *)p2));
-    const u32 lcpinc = (u32)__builtin_ctz(~_mm_movemask_epi8(cmp));
-    if (lcpinc < sizeof(__m128i))
-      return clen + lcpinc;
-    clen += sizeof(__m128i);
-    p1 += sizeof(__m128i);
-    p2 += sizeof(__m128i);
+
+  const u32 max64 = max >> 3 << 3;
+  while (clen < max64) {
+    const u64 v1 = *(const u64 *)p1;
+    const u64 v2 = *(const u64 *)p2;
+    if (v1 != v2)
+      return clen + (__builtin_ctzl(v1 ^ v2) >> 3);
+
+    clen += sizeof(u64);
+    p1 += sizeof(u64);
+    p2 += sizeof(u64);
   }
 
-  const u32 max32 = max & (~0x3u);
-  // inc by 4
-  while (clen < max32) {
+  if ((clen + sizeof(u32)) <= max) {
     const u32 v1 = *(const u32 *)p1;
     const u32 v2 = *(const u32 *)p2;
     if (v1 != v2)
       return clen + (__builtin_ctz(v1 ^ v2) >> 3);
+
     clen += sizeof(u32);
     p1 += sizeof(u32);
     p2 += sizeof(u32);
   }
+
   while ((clen < max) && (*p1 == *p2)) {
     clen++;
     p1++;
@@ -1384,14 +1448,17 @@ kvmap_pkey(const u64 hash)
 kv_pattern(const char c)
 {
   switch (c) {
-    case 's': return "%c";
-    case 'x': return " %02hhx";
-    case 'd': return " %03hhu";
-    default: return NULL;
+  case 's': return "%c";
+  case 'x': return " %02hhx";
+  case 'd': return " %03hhu";
+  case 'X': return " %hhx";
+  case 'D': return " %hhu";
+  default: return NULL;
   }
 }
 
-// cmd "KV" K and V can be 's' for string, 'x' for hex, 'd' for dec, or else for not printing.
+// cmd "KV" K and V can be 's': string, 'x': hex, 'd': dec, or else for not printing.
+// X and D does not add zeros at the beginning
 // n for newline after kv
   void
 kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
@@ -1399,7 +1466,7 @@ kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
   debug_assert(cmd);
   const u32 klen = kv->klen;
   fprintf(out, "#%04lx #%016lx k[%2u] ", kvmap_pkey(kv->hash), kv->hash, klen);
-  const u32 klim = klen < 1024u ? klen : 1024u;
+  const u32 klim = klen < 128 ? klen : 128;
 
   const char * const kpat = kv_pattern(cmd[0]);
   for (u32 i = 0; i < klim; i++)
@@ -1410,7 +1477,7 @@ kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
   const char * const vpat = kv_pattern(cmd[1]);
   if (vpat) { // may omit value
     const u32 vlen = kv->vlen;
-    const u32 vlim = vlen < 1024u ? vlen : 1024u;
+    const u32 vlim = vlen < 128 ? vlen : 128;
     fprintf(out, "  v[%4u] ", vlen);
     for (u32 i = 0; i < vlim; i++)
       fprintf(out, vpat, kv->kv[klen + i]);
@@ -1482,7 +1549,7 @@ static const struct kvmap_mm kvmap_mm_default = {
 #define WH_SLABMETA_SIZE ((1lu << 21)) // 2MB
 
 #ifndef HEAPCHECKING
-#define WH_SLABLEAF_SIZE ((1lu << 21)) // 1GB; change to 2MB if no 1GB hugepages
+#define WH_SLABLEAF_SIZE ((1lu << 21)) // 2MB is ok
 #else
 #define WH_SLABLEAF_SIZE ((1lu << 21)) // 2MB for valgrind
 #endif
@@ -1916,27 +1983,73 @@ wormhole_hmap_skey(const u16 pkey)
   return pkey ? pkey : 1;
 }
 
-  static inline u32
-wormhole_hmap_peek_slot(const struct wormslot * const s, const m128 skey)
+  static inline m128
+wormhole_hmap_m128_skey(const u16 pkey)
 {
-  return (u32)_mm_movemask_epi8(_mm_cmpeq_epi16(skey, _mm_load_si128((const void *)(s))));
+  const u16 skey = wormhole_hmap_skey(pkey);
+
+#if defined(__x86_64__)
+  return _mm_set1_epi16(skey);
+#elif defined(__aarch64__)
+  return vdupq_n_u16(skey);
+#endif
+}
+
+  static inline u32
+wormhole_hmap_match_mask(const struct wormslot * const s, const m128 skey)
+{
+#if defined(__x86_64__)
+  const m128 sv = _mm_load_si128((const void *)s);
+  return (u32)_mm_movemask_epi8(_mm_cmpeq_epi16(skey, sv));
+#elif defined(__aarch64__)
+  const m128 sv = vld1q_u16((const u16 *)s);
+  const m128 cmp = vceqq_u16(skey, sv); // cmpeq
+  const uint32x4_t sr2 = vreinterpretq_u32_u16(vshrq_n_u16(cmp, 14)); // 2-bit x 8
+  const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x 4
+  const m128 sr8 = vreinterpretq_u16_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x 2
+  const u32 r = vgetq_lane_u16(sr8, 0) | (vgetq_lane_u16(sr8, 4) << 8);
+  return r;
+#endif
+}
+
+  static inline u32
+wormhole_hmap_match_any(const struct wormslot * const s, const m128 skey)
+{
+#if defined(__x86_64__)
+  return wormhole_hmap_match_mask(s, skey);
+#elif defined(__aarch64__)
+  const m128 sv = vld1q_u16((const u16 *)s);
+  const m128 cmp = vceqq_u16(skey, sv); // cmpeq
+  const u16 max = vmaxvq_u16(cmp);
+  return max;
+#endif
+}
+
+  static inline m128
+wormhole_hmap_zero(void)
+{
+#if defined(__x86_64__)
+  return _mm_setzero_si128();
+#elif defined(__aarch64__)
+  return vdupq_n_u16(0);
+#endif
 }
 
 // meta_lcp only
   static inline bool
 wormhole_hmap_peek(const struct wormhmap * const hmap, const u32 hash32)
 {
-  const m128 sk = _mm_set1_epi16(wormhole_hmap_skey(wormhole_pkey(hash32)));
+  const m128 sk = wormhole_hmap_m128_skey((wormhole_pkey(hash32)));
   const u32 midx = hash32 & hmap->mask;
   const u32 midy = wormhole_bswap(hash32) & hmap->mask;
-  return wormhole_hmap_peek_slot(&(hmap->wmap[midx]), sk)
-    || wormhole_hmap_peek_slot(&(hmap->wmap[midy]), sk);
+  return wormhole_hmap_match_any(&(hmap->wmap[midx]), sk)
+    || wormhole_hmap_match_any(&(hmap->wmap[midy]), sk);
 }
 
   static inline u64
 wormhole_hmap_count_entry(const struct wormhmap * const hmap, const u32 mid)
 {
-  const u32 mask = wormhole_hmap_peek_slot(&(hmap->wmap[mid]), _mm_setzero_si128());
+  const u32 mask = wormhole_hmap_match_mask(&(hmap->wmap[mid]), wormhole_hmap_zero());
   return mask ? (__builtin_ctz(mask) >> 1) : 8;
 }
 
@@ -1944,7 +2057,7 @@ wormhole_hmap_count_entry(const struct wormhmap * const hmap, const u32 mid)
 wormhole_hmap_get_slot(const struct wormhmap * const hmap, const u32 mid, const m128 skey,
     const struct kv * const key)
 {
-  u32 mask = wormhole_hmap_peek_slot(&(hmap->wmap[mid]), skey);
+  u32 mask = wormhole_hmap_match_mask(&(hmap->wmap[mid]), skey);
   while (mask) {
     const u32 i = __builtin_ctz(mask) >> 1;
     struct wormmeta * const meta = u64_to_ptr(hmap->pmap[mid].e[i].e3);
@@ -1963,7 +2076,7 @@ wormhole_hmap_get(const struct wormhmap * const hmap, const struct kv * const ke
   cpu_prefetchr(&(hmap->pmap[midx]), 0);
   const u32 midy = wormhole_bswap(hash32) & hmap->mask;
   cpu_prefetchr(&(hmap->pmap[midy]), 0);
-  const m128 skey = _mm_set1_epi16(wormhole_hmap_skey(wormhole_pkey(hash32)));
+  const m128 skey = wormhole_hmap_m128_skey((wormhole_pkey(hash32)));
 
   struct wormmeta * const r = wormhole_hmap_get_slot(hmap, midx, skey, key);
   if (r)
@@ -1976,7 +2089,7 @@ wormhole_hmap_get(const struct wormhmap * const hmap, const struct kv * const ke
 wormhole_hmap_get_kref_slot(const struct wormhmap * const hmap, const u32 mid, const m128 skey,
     const struct wormkref * const kref)
 {
-  u32 mask = wormhole_hmap_peek_slot(&(hmap->wmap[mid]), skey);
+  u32 mask = wormhole_hmap_match_mask(&(hmap->wmap[mid]), skey);
   while (mask) {
     const u32 i = __builtin_ctz(mask) >> 1;
     struct wormmeta * const meta = u64_to_ptr(hmap->pmap[mid].e[i].e3);
@@ -1997,7 +2110,7 @@ wormhole_hmap_get_kref(const struct wormhmap * const hmap, const struct wormkref
   cpu_prefetchr(&(hmap->pmap[midx]), 0);
   const u32 midy = wormhole_bswap(hash32) & hmap->mask;
   cpu_prefetchr(&(hmap->pmap[midy]), 0);
-  const m128 skey = _mm_set1_epi16(wormhole_hmap_skey(wormhole_pkey(hash32)));
+  const m128 skey = wormhole_hmap_m128_skey((wormhole_pkey(hash32)));
 
   struct wormmeta * const r = wormhole_hmap_get_kref_slot(hmap, midx, skey, kref);
   if (r)
@@ -2010,7 +2123,7 @@ wormhole_hmap_get_kref(const struct wormhmap * const hmap, const struct wormkref
 wormhole_hmap_get_kref1_slot(const struct wormhmap * const hmap, const u32 mid,
     const m128 skey, const struct wormkref * const kref, const u8 cid)
 {
-  u32 mask = wormhole_hmap_peek_slot(&(hmap->wmap[mid]), skey);
+  u32 mask = wormhole_hmap_match_mask(&(hmap->wmap[mid]), skey);
   while (mask) {
     const u32 i = __builtin_ctz(mask) >> 1;
     struct wormmeta * const meta = u64_to_ptr(hmap->pmap[mid].e[i].e3);
@@ -2027,12 +2140,12 @@ wormhole_hmap_get_kref1_slot(const struct wormhmap * const hmap, const u32 mid,
 wormhole_hmap_get_kref1(const struct wormhmap * const hmap, const struct wormkref * const kref,
     const u8 cid)
 {
-  const u32 hash32 = _mm_crc32_u8(kref->hashlo, cid);
+  const u32 hash32 = crc32c_u8(kref->hashlo, cid);
   const u32 midx = hash32 & hmap->mask;
   cpu_prefetchr(&(hmap->pmap[midx]), 0);
   const u32 midy = wormhole_bswap(hash32) & hmap->mask;
   cpu_prefetchr(&(hmap->pmap[midy]), 0);
-  const m128 skey = _mm_set1_epi16(wormhole_hmap_skey(wormhole_pkey(hash32)));
+  const m128 skey = wormhole_hmap_m128_skey((wormhole_pkey(hash32)));
 
   struct wormmeta * const r = wormhole_hmap_get_kref1_slot(hmap, midx, skey, kref, cid);
   if (r)
@@ -2196,7 +2309,7 @@ wormhole_hmap_set(struct wormhmap * const hmap, const struct wormmeta * const me
 wormhole_hmap_del_slot(struct wormhmap * const hmap, const u32 mid,
     const struct kv * const key, const m128 skey)
 {
-  u32 mask = wormhole_hmap_peek_slot(&(hmap->wmap[mid]), skey);
+  u32 mask = wormhole_hmap_match_mask(&(hmap->wmap[mid]), skey);
   while (mask) {
     const u32 i = __builtin_ctz(mask) >> 1;
     const struct wormmeta * const meta = u64_to_ptr(hmap->pmap[mid].e[i].e3);
@@ -2221,7 +2334,7 @@ wormhole_hmap_del(struct wormhmap * const hmap, const struct kv * const key)
   cpu_prefetchr(&(hmap->pmap[midx]), 0);
   const u32 midy = wormhole_bswap(hash32) & hmap->mask;
   cpu_prefetchr(&(hmap->pmap[midy]), 0);
-  const m128 skey = _mm_set1_epi16(wormhole_hmap_skey(wormhole_pkey(hash32)));
+  const m128 skey = wormhole_hmap_m128_skey((wormhole_pkey(hash32)));
   return wormhole_hmap_del_slot(hmap, midx, key, skey)
     || wormhole_hmap_del_slot(hmap, midy, key, skey);
 }
@@ -2410,7 +2523,7 @@ wormhole_meta_lcp(const struct wormhmap * const hmap, struct wormkref * const kr
       ret = tmp;
       if (wormhole_meta_bm_test(tmp, kref->key[pm])) {
         lo++;
-        seed = _mm_crc32_u8(seed, kref->key[pm]);
+        seed = crc32c_u8(seed, kref->key[pm]);
         ret = NULL;
       } else {
         hi = pm + 1;
@@ -2431,7 +2544,7 @@ wormhole_meta_lcp(const struct wormhmap * const hmap, struct wormkref * const kr
       ret = tmp;
       if (wormhole_meta_bm_test(tmp, kref->key[pm])) {
         lo++;
-        seed = _mm_crc32_u8(seed, kref->key[pm]);
+        seed = crc32c_u8(seed, kref->key[pm]);
         ret = NULL;
       } else {
         hi = pm + 1;
@@ -3127,7 +3240,7 @@ wormhole_split_meta_extend(struct wormhmap * const hmap, struct wormmeta * const
   }
   struct slab * const slab = hmap->map->slab_meta[hmap->hmap_id];
   struct wormleaf * const lmost = meta->lmost;
-  const u64 hash321 = _mm_crc32_u8(mkey->hashlo, 0);
+  const u64 hash321 = crc32c_u8(mkey->hashlo, 0);
   const u32 len1 = len0 + 1; // new anchor at +1
   struct wormmeta * const meta1 = wormhole_alloc_meta(slab, lmost, mkey1, hash321, len1);
   debug_assert(meta1);

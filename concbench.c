@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <immintrin.h>
 #include <stdatomic.h>
 #include "wh.h"
 
@@ -22,7 +21,7 @@ u64 __endtime = 0;
   static void *
 kv_load_worker(struct wormhole * const wh)
 {
-  srandom_u64(rdtsc() * rdtsc());
+  srandom_u64(time_nsec() * time_nsec());
   struct wormref * const ref = wormhole_ref(wh);
   const u64 seq = atomic_fetch_add(&__seqno, 1);
   const u64 n0 = __nkeys / __nth * seq;

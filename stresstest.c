@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <immintrin.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <byteswap.h>

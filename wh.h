@@ -25,9 +25,6 @@ typedef uint_least64_t          u64;
 
 // timing {{{
   extern u64
-rdtsc(void);
-
-  extern u64
 time_nsec(void);
 
   extern double
