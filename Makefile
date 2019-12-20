@@ -82,7 +82,7 @@ NBI += memcpy memmove memcmp
 
 # minimal requirement on x86_64: -march=nehalem
 # minimal requirement on aarch64: -march=armv8-a+crc
-FLG += -march=$(ARCH) -mtune=$(TUNE)
+FLG += -march=$(ARCH) -mtune=$(TUNE) -msse4.2
 FLG += -pthread -Wall -Wextra -Wshadow
 FLG += $(addprefix -fno-builtin-,$(NBI))
 FLG += $(OPT)

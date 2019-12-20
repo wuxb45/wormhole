@@ -332,7 +332,9 @@ spinlock_lock(spinlock * const lock)
 spinlock_trylock_nr(spinlock * const lock, u16 nr)
 {
   pthread_spinlock_t * const p = (typeof(p))lock;
+#if defined(__clang__)
 #pragma nounroll
+#endif
   do {
     if (0 == pthread_spin_trylock(p))
       return true;
@@ -376,7 +378,9 @@ rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
   if ((atomic_fetch_add(pvar, 1) >> RWLOCK_WSHIFT) == 0)
     return true;
 
+#if defined(__clang__)
 #pragma nounroll
+#endif
   do { // someone already locked; wait for a little while
     cpu_pause();
     if ((atomic_load(pvar) >> RWLOCK_WSHIFT) == 0)
@@ -406,7 +410,9 @@ rwlock_trylock_write(rwlock * const lock)
   static inline bool
 rwlock_trylock_write_nr(rwlock * const lock, u16 nr)
 {
+#if defined(__clang__)
 #pragma nounroll
+#endif
   do {
     if (rwlock_trylock_write(lock))
       return true;
@@ -419,11 +425,15 @@ rwlock_trylock_write_nr(rwlock * const lock, u16 nr)
 rwlock_lock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
+#if defined(__clang__)
 #pragma nounroll
+#endif
   do {
     if (rwlock_trylock_write(lock))
       return;
+#if defined(__clang__)
 #pragma nounroll
+#endif
     do {
       cpu_pause();
     } while (atomic_load(pvar));
@@ -763,7 +773,7 @@ thread_fork_join(const u64 nr, void *(*func) (void *), const bool args, void * c
   return dt;
 }
 
-  inline int
+  static inline int
 thread_create_at(const u64 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg)
 {
   const u64 cpu_id = cpu % process_ncpu;
@@ -953,7 +963,9 @@ crc32c_inc_0123(const u8 * buf, u32 nr, u32 crc)
 crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
 {
   debug_assert((nr & 3) == 0);
+#if defined(__clang__)
 #pragma nounroll
+#endif
   while (nr >= sizeof(u64)) {
     crc = crc32c_u64(crc, *((u64*)buf));
     nr -= sizeof(u64);
@@ -967,7 +979,9 @@ crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
   static inline u32
 crc32c_inc(const u8 * buf, u32 nr, u32 crc)
 {
+#if defined(__clang__)
 #pragma nounroll
+#endif
   while (nr >= sizeof(u64)) {
     crc = crc32c_u64(crc, *((u64*)buf));
     nr -= sizeof(u64);
@@ -1060,7 +1074,9 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
   if (ptr == NULL)
     return;
   struct qshard * const shard = qsbr_shard(q, ptr);
+#if defined(__clang__)
 #pragma nounroll
+#endif
   while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
     (*ptr) = q->target;
     cpu_pause();
