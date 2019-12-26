@@ -128,14 +128,6 @@ The thread-unsafe functions don't use the reference (_wormref_). Simply feed it 
     ... // other unsafe operations
     wormhole_destroy(index);
 
-### Light-weight GET functions
-`wormhole_get()` returns a full copy of the key-value pair to the user-provided buffer (or malloc-ed if `out == 0`).
-This can be suboptimal when dealing with long keys and short values.
-To minimize copying, the `wormhole_getv` and `wormhole_getu64` functions avoid copying the key.
-
-`wormhole_getu64` returns 0 if the key if not found or the value's length is shorter than 8 bytes.
-This can be useful if the application logic treats "`value == 0`" as equivalent to "not found".
-
 ### In-place update with user-defined function
 `wormhole_inplace` executes a user-defined function on an existing key-value item.
 If the key does not exist, a NULL pointer will be passed to the user-defined function.
@@ -145,7 +137,7 @@ A simple example would be incrementing a counter stored in a key-value pair.
     void myadd1(struct kv * kv, void * priv) {
       if (kv != NULL) {
         assert(kv->vlen >= sizeof(u64));
-        u64 * pvalue = kv_vptr(kv0);
+        u64 * pvalue = kv_vptr(kv);
         (*pvalue)++;
       }
     }
@@ -158,12 +150,27 @@ A simple example would be incrementing a counter stored in a key-value pair.
 
     // perform +1
     struct kv * key = kv_create("counter", 7, NULL, 0); // malloc-ed
-    wormhole_update(ref, key, myadd1, NULL);
+    wormhole_inplace(ref, key, myadd1, NULL);
     free(key);
 
 Note that the user-defined function should ONLY change the value's content, and nothing else.
 Otherwise, the index can be corrupted.
 A similar mechanism is also provided for iterators (`wormhole_iter_inplace`).
+
+The inplace function can also be used to retrieve key-value data. For example:
+
+    void inplace_getu64(struct kv * kv, void * priv) {
+      if (kv != NULL) {
+        assert(kv->vlen >= sizeof(u64));
+        u64 * pvalue = kv_vptr(kv);
+        *(u64 *)priv = *pvalue;
+      } else {
+        *(u64 *)priv = 0;
+      }
+    }
+    ...
+    u64 val;
+    wormhole_inplace(ref, key, inplace_getu64, &val);
 
 ### Iterator
 The `wormhole_iter_{seek,peek,skip,next,inplace}` functions provide range-search functionalities.

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include "lib.h"
 #include "wh.h"
 
 atomic_uint_least64_t __seqno = 0;
@@ -119,16 +120,16 @@ main(int argc, char ** argv)
   __nkeys = nkeys;
   struct wormhole * const wh = wormhole_create(NULL);
   __nth = 4;
-  const double dtl = thread_fork_join(4, (void *)kv_load_worker, false, (void *)wh);
-  printf("load x4 %.2lf mops\n", ((double)nkeys) / dtl * 1e-6);
+  const u64 dtl = thread_fork_join(4, (void *)kv_load_worker, false, (void *)wh);
+  printf("load x4 %.2lf mops\n", ((double)nkeys) * 1e3 / ((double)dtl));
 
   const u64 nth = strtoull(argv[3], NULL, 10);
   printf("probe with %lu threads. each round takes 10 seconds\n", nth);
   for (u64 i = 0; i < 3; i++) {
     __tot = 0;
     __endtime = time_nsec() + 3e9; // 10 sec
-    const double dt = thread_fork_join(nth, (void *)kv_probe_worker, false, (void *)wh);
-    const double mops = ((double)__tot) / dt * 1e-6;
+    const u64 dt = thread_fork_join(nth, (void *)kv_probe_worker, false, (void *)wh);
+    const double mops = ((double)__tot) * 1e3 / ((double)dt);
     printf("probe x%lu %.2lf mops\n", nth, mops);
     sleep(1);
   }

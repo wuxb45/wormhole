@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016--2018  Wu, Xingbo <wuxb45@gmail.com>
+ * Copyright (c) 2016--2019  Wu, Xingbo <wuxb45@gmail.com>
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
@@ -7,53 +7,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// includes {{{
-// C headers
-#include <inttypes.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdio.h>
-// }}} includes
-
-// types {{{
-typedef uint_least8_t           u8;
-typedef uint_least16_t          u16;
-typedef uint_least32_t          u32;
-typedef uint_least64_t          u64;
-// }}} types
-
-// timing {{{
-  extern u64
-time_nsec(void);
-
-  extern double
-time_sec(void);
-
-  extern double
-time_diff_sec(const double last);
-
-  extern void
-time_stamp(char * str, const size_t size);
-// }}} timing
-
-// random {{{
-  extern u64
-random_u64(void);
-
-  extern void
-srandom_u64(const u64 seed);
-// }}} random
-
-// process/thread {{{
-  extern u64
-process_affinity_core_count(void);
-
-// if args == true, argx is void **
-// if args == false, argx is void *
-  extern double
-thread_fork_join(const u64 nr, void *(*func) (void *), const bool args, void * const argx);
-// }}} process/thread
 
 // kv {{{
 /*
@@ -160,6 +113,9 @@ typedef int  (*kv_compare_func)(const struct kv * const kv1, const struct kv * c
   extern int
 kv_keycompare(const struct kv * const kv1, const struct kv * const kv2);
 
+  extern int
+kv_compare_vi128(const struct kv * const sk, const u8 * const vi128);
+
   extern void
 kv_qsort(const struct kv ** const kvs, const size_t nr);
 
@@ -175,12 +131,21 @@ kv_vptr_c(const struct kv * const kv);
   extern const void *
 kv_kptr_c(const struct kv * const kv);
 
+  extern u32
+kv_key_lcp(const struct kv * const key1, const struct kv * const key2);
+
   extern void
 kv_print(const struct kv * const kv, const char * const cmd, FILE * const out);
+
+  extern size_t
+kv_vi128_estimate(const struct kv * const kv);
+
+  extern u8 *
+kv_vi128_encode(u8 * ptr, const struct kv * const kv);
 // }}} kv
 
 // kvmap {{{
-typedef void (* kv_inplace_func)(struct kv * const kv0, void * const priv);
+typedef void (* kv_inplace_func)(struct kv * const curr, void * const priv);
 
 typedef struct kv * (* kv_alloc_func)(const u64, void * const);
 
@@ -209,12 +174,6 @@ whunsafe_create(const struct kvmap_mm * const mm);
   extern struct kv *
 wormhole_get(struct wormref * const ref, const struct kv * const key, struct kv * const out);
 
-  extern struct sbuf *
-wormhole_getv(struct wormref * const ref, const struct kv * const key, struct sbuf * const out);
-
-  extern u64
-wormhole_getu64(struct wormref * const ref, const struct kv * const key);
-
   extern bool
 wormhole_probe(struct wormref * const ref, const struct kv * const key);
 
@@ -222,7 +181,8 @@ wormhole_probe(struct wormref * const ref, const struct kv * const key);
 wormhole_set(struct wormref * const ref, const struct kv * const kv);
 
   extern bool
-wormhole_inplace(struct wormref * const ref, const struct kv * const kv0, kv_inplace_func uf, void * const priv);
+wormhole_inplace(struct wormref * const ref, const struct kv * const key,
+    kv_inplace_func uf, void * const priv);
 
   extern bool
 wormhole_del(struct wormref * const ref, const struct kv * const key);
@@ -264,14 +224,9 @@ wormhole_clean(struct wormhole * const map);
 wormhole_destroy(struct wormhole * const map);
 
 // unsafe API
+
   extern struct kv *
 whunsafe_get(struct wormhole * const map, const struct kv * const key, struct kv * const out);
-
-  extern struct sbuf *
-whunsafe_getv(struct wormhole * const map, const struct kv * const key, struct sbuf * const out);
-
-  extern void *
-whunsafe_getp(struct wormhole * const map, const struct kv * const key);
 
   extern bool
 whunsafe_probe(struct wormhole * const map, const struct kv * const key);
@@ -307,6 +262,45 @@ whunsafe_iter_inplace(struct wormhole_iter * const iter, kv_inplace_func uf, voi
   extern void
 whunsafe_iter_destroy(struct wormhole_iter * const iter);
 
+  extern bool
+wormhole_locking(struct wormhole * const map, const bool locking);
+
+  extern bool
+whunsafe_locking(struct wormhole * const map, const bool locking);
+
+  extern void
+wormhole_fprint(struct wormhole * const map, FILE * const out);
+
+// verify & debugging
+  extern bool
+wormhole_verify(struct wormhole * const map);
+
+  extern void
+wormhole_dump_memory(struct wormhole * const map, const char * const filename, const char * const opt);
+
+  extern bool
+wormhole_merge_at(struct wormref * const ref, const struct kv * const key);
+
+  extern bool
+wormhole_split_at(struct wormref * const ref, const struct kv * const key);
+
+  extern void
+wormhole_sync_at(struct wormref * const ref, const struct kv * const key);
+
+  extern void
+wormhole_print_meta_anchors(struct wormhole * const map, const char * const pattern);
+
+  extern void
+wormhole_print_leaf_anchors(struct wormhole * const map, const char * const pattern);
+
+  extern void
+wormhole_print_meta_lrmost(struct wormhole * const map, const char * const pattern);
+
+  extern void *
+wormhole_jump_leaf_only(struct wormhole * const map, const struct kv * const key);
+
+  extern struct kv **
+wormhole_anchors(struct wormhole * const map);
 // }}} wormhole
 
 #ifdef __cplusplus

@@ -12,7 +12,7 @@ TARGETS += demo1 concbench stresstest
 # X => X.c only
 SOURCES +=
 # X => X.c X.h
-MODULES += wh
+MODULES += lib wh
 
 # EXTERNSRC/EXTERNDEP do not belong to this repo.
 # extern-src will be linked
