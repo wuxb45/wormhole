@@ -1991,54 +1991,60 @@ a2u64(const void * const str)
   return strtoull(str, NULL, 10);
 }
 
-// returns a NULL-terminated list of string tokens (char **).
-// After use free the returned pointer (tokens).
+// returns a NULL-terminated list of string tokens.
+// After use you only need to free the returned pointer (char **).
   char **
 string_tokens(const char * const str, const char * const delim)
 {
   if (str == NULL)
     return NULL;
-  size_t aptr = 32;
-  char ** tokens = malloc(sizeof(tokens[0]) * aptr);
+  size_t nptr_alloc = 32;
+  char ** tokens = malloc(sizeof(tokens[0]) * nptr_alloc);
   if (tokens == NULL)
     return NULL;
-  size_t i = 0;
-  char * const buf = strdup(str);
-  char * internal = NULL;
-  const size_t bufsize = strlen(buf) + 1;
-  char * tok = strtok_r(buf, delim, &internal);
+  const size_t bufsize = strlen(str) + 1;
+  char * const buf = malloc(bufsize);
+  if (buf == NULL)
+    goto fail_buf;
+
+  memcpy(buf, str, bufsize);
+  char * saveptr = NULL;
+  char * tok = strtok_r(buf, delim, &saveptr);
+  size_t ntoks = 0;
   while (tok) {
-    if (i >= aptr) {
-      char ** const r = realloc(tokens, sizeof(tokens[0]) * (aptr + 32));
-      if (r == NULL) {
-        free(tokens);
-        free(buf);
-        return NULL;
-      }
+    if (ntoks >= nptr_alloc) {
+      nptr_alloc += 32;
+      char ** const r = realloc(tokens, sizeof(tokens[0]) * nptr_alloc);
+      if (r == NULL)
+        goto fail_realloc;
+
       tokens = r;
-      aptr += 32;
     }
-    tokens[i] = tok;
-    i++;
-    tok = strtok_r(NULL, delim, &internal);
+    tokens[ntoks] = tok;
+    ntoks++;
+    tok = strtok_r(NULL, delim, &saveptr);
   }
-  tokens[i] = tok;
-  const size_t nptr = i + 1;
+  tokens[ntoks] = NULL;
+  const size_t nptr = ntoks + 1; // append a NULL
   const size_t rsize = (sizeof(tokens[0]) * nptr) + bufsize;
   char ** const r = realloc(tokens, rsize);
-  if (r == NULL) {
-    free(tokens);
-    free(buf);
-    return NULL;
-  }
+  if (r == NULL)
+    goto fail_realloc;
+
   tokens = r;
-  char * const content = (char *)(&(tokens[nptr]));
-  memcpy(content, buf, bufsize);
-  for (u64 j = 0; j < i; j++)
-    tokens[j] += (content - buf);
+  char * const dest = (char *)(&(tokens[nptr]));
+  memcpy(dest, buf, bufsize);
+  for (u64 i = 0; i < ntoks; i++)
+    tokens[i] += (dest - buf);
 
   free(buf);
   return tokens;
+
+fail_realloc:
+  free(buf);
+fail_buf:
+  free(tokens);
+  return NULL;
 }
 // }}} string
 
@@ -2775,7 +2781,7 @@ rgen_new_unizipf(const u64 min, const u64 max, const u64 ufactor)
   static u64
 gen_uniform(struct rgen * const gi)
 {
-  return (u64)(((double)random_u64()) * gi->uniform.mul);
+  return gi->uniform.base + (u64)(((double)random_u64()) * gi->uniform.mul);
 }
 
   struct rgen *
@@ -3689,7 +3695,8 @@ forker_papi_prepare(void)
 }
 
   static void
-forker_papi_report(struct forker_papi_info * const papi_info, struct forker_worker_info ** const infov, const u64 cc, FILE * const out)
+forker_papi_report(struct forker_papi_info * const papi_info,
+    struct forker_worker_info ** const infov, const u64 cc, FILE * const out)
 {
   if (papi_info == NULL)
     return;
