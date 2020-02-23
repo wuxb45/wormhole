@@ -111,6 +111,8 @@ crc32c_extend(const u32 lo)
 // }}} crc32c
 
 // kv {{{
+
+// size {{{
   inline size_t
 kv_size(const struct kv * const kv)
 {
@@ -136,12 +138,22 @@ key_size_align(const struct kv *const key, const u64 align)
   debug_assert(align && ((align & (align - 1)) == 0));
   return (sizeof(*key) + key->klen + (align - 1)) & (~(align - 1));
 }
+// }}} size
 
+// construct {{{
   inline void
 kv_update_hash(struct kv * const kv)
 {
   const u32 lo = crc32c((const void *)kv->kv, kv->klen);
   kv->hash = crc32c_extend(lo);
+}
+
+// 0 to 0xffff;
+  static inline u64
+kvmap_pkey(const u64 hash)
+{
+  const u64 pkey0 = ((hash >> 16) ^ hash) & 0xfffflu;
+  return pkey0 ? pkey0 : 1;
 }
 
   inline void
@@ -184,7 +196,9 @@ kv_create_str(const char * const key, const char * const value)
 {
   return kv_create(key, (u32)strlen(key), value, (u32)strlen(value));
 }
+// }}} construct
 
+// dup {{{
   inline struct kv *
 kv_dup(const struct kv * const kv)
 {
@@ -266,31 +280,9 @@ kv_dup2_sbuf(const struct kv * const from, struct sbuf * const to)
   }
   return new;
 }
+// }}} dup
 
-  struct kv *
-kv_alloc_malloc(const u64 size, void * const priv)
-{
-  (void)priv;
-  return malloc(size);
-}
-
-  void
-kv_retire_free(struct kv * const kv, void * const priv)
-{
-  (void)priv;
-  free(kv);
-}
-
-  static inline struct kv *
-kv_mm_dup(const struct kv * const kv, const struct kvmap_mm * const mm)
-{
-  const u64 sz = kv_size(kv);
-  struct kv * const new = mm->af(sz, mm->ap);
-  debug_assert(new);
-  memcpy(new, kv, sz);
-  return new;
-}
-
+// compare {{{
 // key1 and key2 must be valid ptr
 // kv: key1 is the search key; key2 is the index key that is often not in the cache;
   inline bool
@@ -333,18 +325,38 @@ kv_keycompare(const struct kv * const kv1, const struct kv * const kv2)
   static int
 kv_compare_pp(const void * const p1, const void * const p2)
 {
-  const struct kv ** const pp1 = (typeof(pp1))p1;
-  const struct kv ** const pp2 = (typeof(pp2))p2;
+  const struct kv * const * const pp1 = (typeof(pp1))p1;
+  const struct kv * const * const pp2 = (typeof(pp2))p2;
   return kv_keycompare(*pp1, *pp2);
 }
 
   int
-kv_compare_vi128(const struct kv * const sk, const u8 * const vi128)
+kv_compare_k128(const struct kv * const sk, const u8 * const k128)
 {
+  if (sk == NULL)
+    return -1;
   const u32 klen1 = sk->klen;
-  u32 klen2 = 0, vlen2 = 0;
-  const u8 * const ptr2 = vi128_decode_u32(vi128_decode_u32(vi128, &klen2), &vlen2);
-  const u32 len = klen1 < klen2 ? klen1 : klen2;
+  u32 klen2 = 0;
+  const u8 * const ptr2 = vi128_decode_u32(k128, &klen2);
+  debug_assert(ptr2);
+  const u32 len = (klen1 < klen2) ? klen1 : klen2;
+  const int cmp = memcmp(sk->kv, ptr2, len);
+  if (cmp != 0)
+    return cmp;
+  else
+    return ((int)klen1) - ((int)klen2);
+}
+
+  int
+kv_compare_kv128(const struct kv * const sk, const u8 * const kv128)
+{
+  if (sk == NULL)
+    return -1;
+  const u32 klen1 = sk->klen;
+  u32 klen2 = 0;
+  u32 vlen2 = 0;
+  const u8 * const ptr2 = vi128_decode_u32(vi128_decode_u32(kv128, &klen2), &vlen2);
+  const u32 len = (klen1 < klen2) ? klen1 : klen2;
   const int cmp = memcmp(sk->kv, ptr2, len);
   if (cmp != 0)
     return cmp;
@@ -353,33 +365,9 @@ kv_compare_vi128(const struct kv * const sk, const u8 * const vi128)
 }
 
   inline void
-kv_qsort(const struct kv ** const kvs, const size_t nr)
+kv_qsort(struct kv ** const kvs, const size_t nr)
 {
   qsort(kvs, nr, sizeof(kvs[0]), kv_compare_pp);
-}
-
-  inline void *
-kv_vptr(struct kv * const kv)
-{
-  return (void *)(&(kv->kv[kv->klen]));
-}
-
-  inline void *
-kv_kptr(struct kv * const kv)
-{
-  return (void *)(&(kv->kv[0]));
-}
-
-  inline const void *
-kv_vptr_c(const struct kv * const kv)
-{
-  return (const void *)(&(kv->kv[kv->klen]));
-}
-
-  inline const void *
-kv_kptr_c(const struct kv * const kv)
-{
-  return (const void *)(&(kv->kv[0]));
 }
 
 // return the length of longest common prefix of the two keys
@@ -421,6 +409,32 @@ kv_key_lcp(const struct kv * const key1, const struct kv * const key2)
   }
   return clen;
 }
+// }}}
+
+// ptr {{{
+  inline void *
+kv_vptr(struct kv * const kv)
+{
+  return (void *)(&(kv->kv[kv->klen]));
+}
+
+  inline void *
+kv_kptr(struct kv * const kv)
+{
+  return (void *)(&(kv->kv[0]));
+}
+
+  inline const void *
+kv_vptr_c(const struct kv * const kv)
+{
+  return (const void *)(&(kv->kv[kv->klen]));
+}
+
+  inline const void *
+kv_kptr_c(const struct kv * const kv)
+{
+  return (const void *)(&(kv->kv[0]));
+}
 
   static inline void *
 u64_to_ptr(const u64 v)
@@ -433,15 +447,9 @@ ptr_to_u64(const void * const ptr)
 {
   return (u64)ptr;
 }
+// }}} ptr
 
-// 0 to 0xffff;
-  static inline u64
-kvmap_pkey(const u64 hash)
-{
-  const u64 pkey0 = ((hash >> 16) ^ hash) & 0xfffflu;
-  return pkey0 ? pkey0 : 1;
-}
-
+// print {{{
   static const char *
 kv_pattern(const char c)
 {
@@ -485,21 +493,37 @@ kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
   if (strchr(cmd, 'n'))
     fprintf(out, "\n");
 }
+// }}} print
 
-  inline size_t
-kv_vi128_estimate(const struct kv * const kv)
+// mm {{{
+  struct kv *
+kv_dup_in_default(const struct kv * const kv, void * const priv)
 {
-  return vi128_estimate(kv->klen) + vi128_estimate(kv->vlen) + kv->klen + kv->vlen;
+  (void)priv;
+  return kv_dup(kv);
 }
 
-  u8 *
-kv_vi128_encode(u8 * ptr, const struct kv * const kv)
+  struct kv *
+kv_dup_out_default(const struct kv * const kv, struct kv * const out)
 {
-  ptr = vi128_encode_u32(ptr, kv->klen);
-  ptr = vi128_encode_u32(ptr, kv->vlen);
-  memcpy(ptr, kv->kv, kv->klen + kv->vlen);
-  return ptr + kv->klen + kv->vlen;
+  return kv_dup2(kv, out);
 }
+
+  void
+kv_free_default(struct kv * const kv, void * const priv)
+{
+  (void)priv;
+  free(kv);
+}
+
+static const struct kvmap_mm kvmap_mm_default = {
+  .in = kv_dup_in_default,
+  .out = kv_dup_out_default,
+  .free = kv_free_default,
+  .priv = NULL,
+};
+// }}} mm
+
 // }}} kv
 
 // kvmap {{{
@@ -523,7 +547,7 @@ struct kvbucket {
 static_assert(sizeof(struct kvbucket) == 64, "sizeof(kvbucket) != 64");
 
   static inline int
-kvmap_entry_keycompare_vptr(const void * const p1, const void * const p2)
+kvmap_entry_qsort_keycompare(const void * const p1, const void * const p2)
 {
   const struct entry13 * const e1 = (typeof(e1))p1;
   const struct entry13 * const e2 = (typeof(e2))p2;
@@ -535,16 +559,16 @@ kvmap_entry_keycompare_vptr(const void * const p1, const void * const p2)
   static inline void
 kvmap_entry_qsort(struct entry13 * const es, const u64 nr)
 {
-  qsort(es, nr, sizeof(es[0]), kvmap_entry_keycompare_vptr);
+  qsort(es, nr, sizeof(es[0]), kvmap_entry_qsort_keycompare);
 }
 
 // mm
   static inline void
-kvmap_put_entry(struct kvmap_mm * const mm, struct entry13 * const e, const struct kv * const kv)
+kvmap_entry_update(struct kvmap_mm * const mm, struct entry13 * const e, const struct kv * const kv)
 {
   struct kv * const old = u64_to_ptr(e->e3);
-  if (old && mm->rf)
-    mm->rf(old, mm->rp);
+  if (old && mm->free)
+    mm->free(old, mm->priv);
   if (kv) {
     e->e3 = ptr_to_u64(kv);
     e->e1 = kvmap_pkey(kv->hash);
@@ -552,13 +576,6 @@ kvmap_put_entry(struct kvmap_mm * const mm, struct entry13 * const e, const stru
     e->v64 = 0;
   }
 }
-
-static const struct kvmap_mm kvmap_mm_default = {
-  .af = kv_alloc_malloc,
-  .ap = NULL,
-  .rf = kv_retire_free,
-  .rp = NULL,
-};
 // }}} kvmap
 
 // wormhole {{{
@@ -660,7 +677,7 @@ struct wormhole_iter {
     struct wormhole * map; // for unsafe iter
   };
   struct wormleaf * leaf;
-  u32 next_id;
+  u64 next_id;
 };
 
 struct wormkref { // reference to a key
@@ -1643,6 +1660,7 @@ wormhole_jump_leaf_write(struct wormref * const ref, const struct kv * const key
 // leaf-only read {{{
 // assumes there in no duplicated keys
 // bisect the first key that is >= the given key
+// return 0 .. nr_sorted
   static u64
 wormhole_leaf_bisect_sorted(const struct wormleaf * const leaf, const struct kv * const key)
 {
@@ -1715,7 +1733,7 @@ wormhole_get(struct wormref * const ref, const struct kv * const key, struct kv 
 {
   struct wormleaf * const leaf = wormhole_jump_leaf_read(ref, key);
   const u64 i = wormhole_leaf_match(leaf, key);
-  struct kv * const tmp = (i < WH_KPN) ? kv_dup2(u64_to_ptr(leaf->eh[i].e3), out) : NULL;
+  struct kv * const tmp = (i < WH_KPN) ? ref->map->mm.out(u64_to_ptr(leaf->eh[i].e3), out) : NULL;
   rwlock_unlock_read(&(leaf->leaflock));
   return tmp;
 }
@@ -1734,7 +1752,7 @@ whunsafe_get(struct wormhole * const map, const struct kv * const key, struct kv
 {
   struct wormleaf * const leaf = wormhole_jump_leaf(map->hmap, key);
   const u64 i = wormhole_leaf_match(leaf, key);
-  return (i < WH_KPN) ? kv_dup2(u64_to_ptr(leaf->eh[i].e3), out) : NULL;
+  return (i < WH_KPN) ? map->mm.out(u64_to_ptr(leaf->eh[i].e3), out) : NULL;
 }
 
   bool
@@ -1960,7 +1978,7 @@ wormhole_leaf_update(struct wormhole * const map, struct wormleaf * const leaf, 
       break;
   debug_assert(is < nr); // must exist
 
-  kvmap_put_entry(&(map->mm), &(leaf->eh[im]), new);
+  kvmap_entry_update(&(map->mm), &(leaf->eh[im]), new);
   leaf->es[is] = leaf->eh[im];
 }
 // }}} single-leaf modification
@@ -2463,7 +2481,8 @@ wormhole_set(struct wormref * const ref, const struct kv * const kv)
 {
   // we always allocate a new item on SET
   // future optimizations may perform in-place update
-  struct kv * const new = kv_mm_dup(kv, &(ref->map->mm));
+  struct wormhole * const map = ref->map;
+  struct kv * const new = map->mm.in(kv, map->mm.priv);
   if (new == NULL)
     return false;
 
@@ -2471,7 +2490,7 @@ wormhole_set(struct wormref * const ref, const struct kv * const kv)
   // update
   const u64 im = wormhole_leaf_match(leaf, new);
   if (im < WH_KPN) {
-    wormhole_leaf_update(ref->map, leaf, im, new);
+    wormhole_leaf_update(map, leaf, im, new);
     rwlock_unlock_write(&(leaf->leaflock));
     return true;
   }
@@ -2487,14 +2506,14 @@ wormhole_set(struct wormref * const ref, const struct kv * const kv)
   // all locks should be released in wormhole_split_insert_ref()
   const bool rsi = wormhole_split_insert_ref(ref, leaf, new);
   if (!rsi)
-    ref->map->mm.rf(new, ref->map->mm.rp);
+    map->mm.free(new, map->mm.priv);
   return rsi;
 }
 
   bool
 whunsafe_set(struct wormhole * const map, const struct kv * const kv)
 {
-  struct kv * const new = kv_mm_dup(kv, &(map->mm));
+  struct kv * const new = map->mm.in(kv, map->mm.priv);
   if (new == NULL)
     return false;
 
@@ -2515,7 +2534,7 @@ whunsafe_set(struct wormhole * const map, const struct kv * const kv)
   // split_insert changes hmap
   const bool rsi = whunsafe_split_insert(map, leaf, new);
   if (!rsi)
-    map->mm.rf(new, map->mm.rp);
+    map->mm.free(new, map->mm.priv);
   return rsi;
 }
 // }}} set
@@ -2708,7 +2727,7 @@ wormhole_del(struct wormref * const ref, const struct kv * const key)
   if (im < WH_KPN) { // found
     struct kv * const kv = wormhole_leaf_remove(leaf, im);
     debug_assert(kv);
-    ref->map->mm.rf(kv, ref->map->mm.rp);
+    ref->map->mm.free(kv, ref->map->mm.priv);
     r = true;
     const u64 n1 = leaf->nr_keys;
     const u64 n2 = leaf->next ? leaf->next->nr_keys : WH_KPN;
@@ -2732,7 +2751,7 @@ whunsafe_del(struct wormhole * const map, const struct kv * const key)
   if (im < WH_KPN) { // found
     struct kv * const kv = wormhole_leaf_remove(leaf, im);
     debug_assert(kv);
-    map->mm.rf(kv, map->mm.rp);
+    map->mm.free(kv, map->mm.priv);
 
     const u64 n0 = leaf->prev ? leaf->prev->nr_keys : WH_KPN;
     const u64 n1 = leaf->nr_keys;
@@ -2759,56 +2778,18 @@ wormhole_iter_create(struct wormref * const ref)
   iter->ref = ref;
   iter->leaf = NULL;
   iter->next_id = 0;
-  wormhole_iter_seek(iter, NULL);
+  struct kv z = {};
+  kv_update_hash(&z);
+  wormhole_iter_seek(iter, &z);
   return iter;
 }
 
-  void
-wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const key)
+  static void
+wormhole_iter_fix(struct wormhole_iter * const iter)
 {
-  if (iter->leaf)
-    rwlock_unlock_read(&(iter->leaf->leaflock));
-  struct wormref * const ref = iter->ref;
-  struct wormhole * const map = ref->map;
-
-  if (key == NULL) {
-    struct wormleaf * const leaf0 = map->leaf0;
-    iter->leaf = leaf0;
-    iter->next_id = 0;
-    while (rwlock_trylock_write_nr(&(leaf0->leaflock), 64) == false)
-      ref->qstate = (u64)(map->hmap);
-    wormhole_leaf_sync_sorted(leaf0);
-    rwlock_write_to_read(&(leaf0->leaflock));
+  if (!wormhole_iter_valid(iter))
     return;
-  }
 
-  struct wormleaf * const leaf = wormhole_jump_leaf_write(ref, key);
-  wormhole_leaf_sync_sorted(leaf);
-  rwlock_write_to_read(&(leaf->leaflock));
-
-  const u64 id = wormhole_leaf_bisect_sorted(leaf, key);
-  if (id < leaf->nr_sorted) {
-    iter->leaf = leaf;
-    iter->next_id = id;
-  } else {
-    struct wormleaf * const next = leaf->next;
-    iter->leaf = next;
-    iter->next_id = 0;
-    if (next) {
-      while (rwlock_trylock_write_nr(&(next->leaflock), 64) == false)
-        ref->qstate = (u64)(map->hmap);
-      wormhole_leaf_sync_sorted(next);
-      rwlock_write_to_read(&(next->leaflock));
-    }
-    rwlock_unlock_read(&(leaf->leaflock));
-  }
-}
-
-  static struct kv *
-wormhole_iter_current(struct wormhole_iter * const iter)
-{
-  if (iter->leaf == NULL)
-    return NULL;
   while (iter->next_id >= iter->leaf->nr_sorted) {
     struct wormleaf * const next = iter->leaf->next;
     if (next) {
@@ -2822,13 +2803,42 @@ wormhole_iter_current(struct wormhole_iter * const iter)
     rwlock_unlock_read(&(iter->leaf->leaflock));
     iter->leaf = next;
     iter->next_id = 0;
-    if (next == NULL)
-      return NULL;
+    if (!wormhole_iter_valid(iter))
+      return;
   }
+}
 
-  debug_assert(iter->next_id < iter->leaf->nr_sorted);
-  struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
-  return kv;
+  void
+wormhole_iter_seek(struct wormhole_iter * const iter, const struct kv * const key)
+{
+  debug_assert(key);
+  if (iter->leaf)
+    rwlock_unlock_read(&(iter->leaf->leaflock));
+
+  struct wormleaf * const leaf = wormhole_jump_leaf_write(iter->ref, key);
+  wormhole_leaf_sync_sorted(leaf);
+  rwlock_write_to_read(&(leaf->leaflock));
+
+  iter->leaf = leaf;
+  iter->next_id = wormhole_leaf_bisect_sorted(leaf, key);
+  wormhole_iter_fix(iter);
+}
+
+  bool
+wormhole_iter_valid(struct wormhole_iter * const iter)
+{
+  return iter->leaf != NULL;
+}
+
+  static struct kv *
+wormhole_iter_current(struct wormhole_iter * const iter)
+{
+  if (wormhole_iter_valid(iter)) {
+    debug_assert(iter->next_id < iter->leaf->nr_sorted);
+    struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
+    return kv;
+  }
+  return NULL;
 }
 
   struct kv *
@@ -2836,19 +2846,7 @@ wormhole_iter_peek(struct wormhole_iter * const iter, struct kv * const out)
 {
   struct kv * const kv = wormhole_iter_current(iter);
   if (kv) {
-    struct kv * const ret = kv_dup2(kv, out);
-    return ret;
-  }
-  return NULL;
-}
-
-  struct kv *
-wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out)
-{
-  struct kv * const kv = wormhole_iter_current(iter);
-  if (kv) {
-    struct kv * const ret = kv_dup2(kv, out);
-    iter->next_id++;
+    struct kv * const ret = iter->ref->map->mm.out(kv, out);
     return ret;
   }
   return NULL;
@@ -2858,10 +2856,20 @@ wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out)
 wormhole_iter_skip(struct wormhole_iter * const iter, const u64 nr)
 {
   for (u64 i = 0; i < nr; i++) {
-    if (wormhole_iter_current(iter) == NULL)
+    if (!wormhole_iter_valid(iter))
       return;
     iter->next_id++;
+    wormhole_iter_fix(iter);
   }
+}
+
+  struct kv *
+wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out)
+{
+  struct kv * const ret = wormhole_iter_peek(iter, out);
+  if (ret)
+    wormhole_iter_skip(iter, 1);
+  return ret;
 }
 
   bool
@@ -2891,77 +2899,52 @@ whunsafe_iter_create(struct wormhole * const map)
   iter->map = map;
   iter->leaf = NULL;
   iter->next_id = 0;
-  whunsafe_iter_seek(iter, NULL);
+  struct kv z = {};
+  kv_update_hash(&z);
+  whunsafe_iter_seek(iter, &z);
   return iter;
 }
 
-  void
-whunsafe_iter_seek(struct wormhole_iter * const iter, const struct kv * const key)
+  static void
+whunsafe_iter_fix(struct wormhole_iter * const iter)
 {
-  struct wormhole * const map = iter->map;
-
-  if (key == NULL) {
-    struct wormleaf * const leaf0 = map->leaf0;
-    iter->leaf = leaf0;
-    iter->next_id = 0;
-    wormhole_leaf_sync_sorted(leaf0);
+  if (!wormhole_iter_valid(iter))
     return;
-  }
 
-  struct wormleaf * const leaf = wormhole_jump_leaf(map->hmap, key);
-  wormhole_leaf_sync_sorted(leaf);
-
-  const u64 id = wormhole_leaf_bisect_sorted(leaf, key);
-  if (id < leaf->nr_sorted) {
-    iter->leaf = leaf;
-    iter->next_id = id;
-  } else {
-    struct wormleaf * const next = leaf->next;
-    iter->leaf = next;
-    iter->next_id = 0;
-    if (next)
-      wormhole_leaf_sync_sorted(next);
-  }
-}
-
-  static struct kv *
-whunsafe_iter_current(struct wormhole_iter * const iter)
-{
-  if (iter->leaf == NULL)
-    return NULL;
   while (iter->next_id >= iter->leaf->nr_sorted) {
     struct wormleaf * const next = iter->leaf->next;
     if (next)
       wormhole_leaf_sync_sorted(next);
     iter->leaf = next;
     iter->next_id = 0;
-    if (next == NULL)
-      return NULL;
+    if (!wormhole_iter_valid(iter))
+      return;
   }
+}
 
-  debug_assert(iter->next_id < iter->leaf->nr_sorted);
-  struct kv * const kv = u64_to_ptr(iter->leaf->es[iter->next_id].e3);
-  return kv;
+  void
+whunsafe_iter_seek(struct wormhole_iter * const iter, const struct kv * const key)
+{
+  struct wormleaf * const leaf = wormhole_jump_leaf(iter->map->hmap, key);
+  wormhole_leaf_sync_sorted(leaf);
+
+  iter->leaf = leaf;
+  iter->next_id = wormhole_leaf_bisect_sorted(leaf, key);
+  whunsafe_iter_fix(iter);
+}
+
+  bool
+whunsafe_iter_valid(struct wormhole_iter * const iter)
+{
+  return wormhole_iter_valid(iter);
 }
 
   struct kv *
 whunsafe_iter_peek(struct wormhole_iter * const iter, struct kv * const out)
 {
-  struct kv * const kv = whunsafe_iter_current(iter);
+  struct kv * const kv = wormhole_iter_current(iter);
   if (kv) {
-    struct kv * const ret = kv_dup2(kv, out);
-    return ret;
-  }
-  return NULL;
-}
-
-  struct kv *
-whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out)
-{
-  struct kv * const kv = whunsafe_iter_current(iter);
-  if (kv) {
-    struct kv * const ret = kv_dup2(kv, out);
-    iter->next_id++;
+    struct kv * const ret = iter->map->mm.out(kv, out);
     return ret;
   }
   return NULL;
@@ -2971,18 +2954,26 @@ whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out)
 whunsafe_iter_skip(struct wormhole_iter * const iter, const u64 nr)
 {
   for (u64 i = 0; i < nr; i++) {
-    if (whunsafe_iter_current(iter) == NULL)
+    if (!wormhole_iter_valid(iter))
       return;
     iter->next_id++;
+    whunsafe_iter_fix(iter);
   }
+}
+
+  struct kv *
+whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out)
+{
+  struct kv * const ret = whunsafe_iter_peek(iter, out);
+  if (ret)
+    whunsafe_iter_skip(iter, 1);
+  return ret;
 }
 
   bool
 whunsafe_iter_inplace(struct wormhole_iter * const iter, kv_inplace_func uf, void * const priv)
 {
-  struct kv * const kv = whunsafe_iter_current(iter);
-  uf(kv, priv); // call uf even if (kv == NULL)
-  return kv != NULL;
+  return wormhole_iter_inplace(iter, uf, priv);
 }
 
   void
@@ -3051,7 +3042,7 @@ wormhole_clean1(struct wormhole * const map)
     struct wormleaf * const next = leaf->next;
     wormhole_free_akey(leaf->anchor);
     for (u64 i = 0; i < WH_KPN; i++)
-      kvmap_put_entry(&(map->mm), &(leaf->eh[i]), NULL);
+      kvmap_entry_update(&(map->mm), &(leaf->eh[i]), NULL);
     slab_free(map->slab_leaf, leaf);
     leaf = next;
   }
@@ -3078,5 +3069,17 @@ wormhole_destroy(struct wormhole * const map)
   free(map);
 }
 // }}} misc
+
+// undef {{{
+#undef WH_HMAPINIT_SIZE
+#undef WH_SLABMETA_SIZE
+#undef WH_SLABLEAF_SIZE
+#undef WH_KPN
+#undef WH_HDIV
+#undef WH_MID
+#undef WH_KPN_MRG
+#undef WH_FO
+#undef WH_BMNR
+// }}} undef
 
 // }}} wormhole

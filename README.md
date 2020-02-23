@@ -8,7 +8,7 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
 ## Highlights:
-* Thread-safety: all operations, including `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-next`, etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
+* Thread-safety: all operations, including `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
 * No background threads or global status. Wormhole uses a mix of user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
