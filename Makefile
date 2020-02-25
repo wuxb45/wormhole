@@ -87,6 +87,13 @@ FLG += -pthread -Wall -Wextra -Wshadow
 FLG += $(addprefix -fno-builtin-,$(NBI))
 FLG += $(OPT)
 
+ifeq ($(CCC),clang)
+FLG += -ferror-limit=3
+else ifeq ($(CCC),gcc)
+FLG += -fmax-errors=3
+FLG += -Wno-unknown-pragmas
+endif
+
 .PHONY : bin dis clean cleanall check tags
 
 bin : $(BIN)
