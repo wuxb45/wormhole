@@ -25,5 +25,5 @@ LIB += rt m
 
 # libwh is part of the target
 bin : libwh.so
-libwh.so : wh.c wh.h
-	$(CCC) $(FLG) -shared -fPIC -o $@ $<
+libwh.so : wh.c wh.h lib.c lib.h
+	$(CCC) $(FLG) -shared -fPIC -o $@ wh.c lib.c
