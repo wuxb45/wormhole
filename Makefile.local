@@ -27,3 +27,5 @@ LIB += rt m
 bin : libwh.so
 libwh.so : wh.c wh.h lib.c lib.h
 	$(CCC) $(FLG) -shared -fPIC -o $@ wh.c lib.c
+libwh.a : wh.o lib.o
+	ar rcs $@ $^
