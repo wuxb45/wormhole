@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016--2019  Wu, Xingbo <wuxb45@gmail.com>
+ * Copyright (c) 2016--2020  Wu, Xingbo <wuxb45@gmail.com>
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
@@ -87,6 +87,9 @@ time_diff_sec(const double last);
 
   extern void
 time_stamp(char * str, const size_t size);
+
+  extern void
+time_stamp2(char * str, const size_t size);
 // }}} timing
 
 // cpucache {{{
@@ -209,39 +212,6 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 thread_get_core(void);
 // }}} process/thread
 
-// coroutine {{{
-#if defined(__x86_64__)
-struct co;
-
-  extern void
-co_exec(const bool host);
-
-  extern struct co *
-co_create(const u64 stacksize, void (*func)(void), void * priv);
-
-  extern void
-co_reset(void);
-
-  extern void *
-co_priv(void);
-
-  extern u64
-co_count(void);
-
-  extern void
-co_yield(void);
-
-  extern void
-co_yield_safe(void);
-
-  extern void
-co_prefetchr_yield_safe(const void * const ptr, const int hint);
-
-  extern void
-co_exit(void);
-#endif // __x86_64__
-// }}} coroutine
-
 // locking {{{
 typedef union {
   u64 opaque;
@@ -263,7 +233,7 @@ spinlock_trylock_nr(spinlock * const lock, u16 nr);
 spinlock_unlock(spinlock * const lock);
 
 typedef union {
-  u64 opaque;
+  u32 opaque;
 } rwlock;
 
   extern void
@@ -313,6 +283,75 @@ mutexlock_trylock(mutexlock * const lock);
 mutexlock_unlock(mutexlock * const lock);
 // }}} locking
 
+// coroutine {{{
+#if defined(__x86_64__)
+
+extern u64 co_switch_stack(u64 * const saversp, const u64 newrsp, const u64 retval);
+
+struct co;
+
+  extern struct co *
+co_create(const u64 stacksize, void * func, void * priv, u64 * const host);
+
+  extern void
+co_reuse(struct co * const co, void * func, void * priv, u64 * const host);
+
+  extern struct co *
+co_fork(void * func, void * priv);
+
+  extern void *
+co_priv(void);
+
+  extern u64
+co_enter(struct co * const to, const u64 retval);
+
+  extern u64
+co_switch_to(struct co * const to, const u64 retval);
+
+  extern u64
+co_back(const u64 retval);
+
+  extern void
+co_exit(const u64 retval);
+
+  extern bool
+co_valid(struct co * const co);
+
+  extern struct co *
+co_self(void);
+
+  extern void
+co_destroy(struct co * const co);
+
+struct corr;
+
+  extern struct corr *
+corr_create(const u64 stacksize, void * func, void * priv, u64 * const host);
+
+  extern struct corr *
+corr_link(const u64 stacksize, void * func, void * priv, struct corr * const prev);
+
+  extern void
+corr_reuse(struct corr * const co, void * func, void * priv, u64 * const host);
+
+  extern void
+corr_relink(struct corr * const co, void * func, void * priv, struct corr * const prev);
+
+  extern void
+corr_enter(struct corr * const co);
+
+  extern void
+corr_yield(void);
+
+  extern void
+corr_exit(void);
+
+  extern void
+corr_destroy(struct corr * const co);
+
+#endif // __x86_64__
+// }}} coroutine
+
 // bits {{{
   extern u32
 bits_reverse_u32(const u32 v);
@@ -340,6 +379,9 @@ bits_p2_down(const u64 v);
 
   extern u64
 bits_round_up(const u64 v, const u8 power);
+
+  extern u64
+bits_round_up_a(const u64 v, const u64 a);
 
   extern u64
 vi128_estimate(const u64 v);
@@ -567,27 +609,27 @@ damp_destroy(struct damp * const d);
 struct vctr;
 
   extern struct vctr *
-vctr_create(const u64 nr);
+vctr_create(const size_t nr);
 
-  extern u64
+  extern size_t
 vctr_size(struct vctr * const v);
 
   extern void
-vctr_add(struct vctr * const v, const u64 i, const u64 n);
+vctr_add(struct vctr * const v, const u64 i, const size_t n);
 
   extern void
 vctr_add1(struct vctr * const v, const u64 i);
 
   extern void
-vctr_add_atomic(struct vctr * const v, const u64 i, const u64 n);
+vctr_add_atomic(struct vctr * const v, const u64 i, const size_t n);
 
   extern void
 vctr_add1_atomic(struct vctr * const v, const u64 i);
 
   extern void
-vctr_set(struct vctr * const v, const u64 i, const u64 n);
+vctr_set(struct vctr * const v, const u64 i, const size_t n);
 
-  extern u64
+  extern size_t
 vctr_get(struct vctr * const v, const u64 i);
 
   extern void
@@ -766,7 +808,8 @@ typedef void * (*forker_worker_func)(void *);
 
 struct pass_info {
   struct rgen * gen0;
-  void * api;
+  const struct kvmap_api * api;
+  void * map;
   u64 vctr_size;
   forker_worker_func wf;
   forker_perf_analyze_func af;
@@ -780,7 +823,8 @@ struct forker_papi_info {
 struct forker_worker_info {
   struct rgen * gen;
   rgen_next_func rgen_next;
-  struct kvmap_api * api;
+  const struct kvmap_api * api;
+  void * map;
   void * priv;
   u64 end_type;
   u64 end_magic;

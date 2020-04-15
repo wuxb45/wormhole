@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016--2019  Wu, Xingbo <wuxb45@gmail.com>
+ * Copyright (c) 2016--2020  Wu, Xingbo <wuxb45@gmail.com>
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
@@ -7,6 +7,7 @@
 
 // headers {{{
 #include "lib.h"
+#include "ctypes.h"
 #include <assert.h>
 #include <byteswap.h>
 #include <execinfo.h>
@@ -14,32 +15,11 @@
 #include <netdb.h>
 #include <sched.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <sys/socket.h>
 #include <sys/sysinfo.h>
+#include <sys/ioctl.h>
 #include <time.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#elif defined(__aarch64__)
-#include <arm_acle.h>
-#include <arm_neon.h>
-#endif
 // }}} headers
-
-// atomic {{{
-/* C11 atomic types */
-typedef atomic_bool             abool;
-
-typedef atomic_uint_least8_t    au8;
-typedef atomic_uint_least16_t   au16;
-typedef atomic_uint_least32_t   au32;
-typedef atomic_uint_least64_t   au64;
-
-typedef atomic_int_least8_t     as8;
-typedef atomic_int_least16_t    as16;
-typedef atomic_int_least32_t    as32;
-typedef atomic_int_least64_t    as64;
-// }}} atomic
 
 // math {{{
   inline u64
@@ -116,6 +96,16 @@ time_stamp(char * str, const size_t size)
   time(&now);
   localtime_r(&now, &nowtm);
   strftime(str, size, "%F %T %z", &nowtm);
+}
+
+  inline void
+time_stamp2(char * str, const size_t size)
+{
+  time_t now;
+  struct tm nowtm;
+  time(&now);
+  localtime_r(&now, &nowtm);
+  strftime(str, size, "%F-%H-%M-%S%z", &nowtm);
 }
 // }}} timing
 
@@ -580,8 +570,10 @@ process_get_rss(void)
   FILE * const fp = fopen("/proc/self/statm", "r");
   if (fp == NULL)
     return 0;
-  fscanf(fp, "%lu %lu", &size, &rss);
+  const int r = fscanf(fp, "%lu %lu", &size, &rss);
   fclose(fp);
+  if (r != 2)
+    return 0;
   return rss * (u64)sysconf(_SC_PAGESIZE);
 }
 
@@ -814,173 +806,8 @@ thread_get_core(void)
 }
 // }}} process/thread
 
-// coroutine {{{
-#if defined(__x86_64__)
-struct co {
-  u64 rsp;
-  void * priv;
-  struct co * next;
-  struct co * prev;
-};
-
-// co-routine
-static __thread struct co * co_curr = NULL; // NULL in host
-static __thread struct co * co_head = NULL;
-static __thread u64 co_host_rsp = 0;
-static __thread u64 co_nr = 0;
-static __thread struct co co_host;
-
-extern void co_switch_stack(u64 * const saversp, const u64 newrsp);
-
-asm (
-    ".global co_switch_stack;"
-    ".type co_switch_stack, @function;"
-    ".align 16;"
-    "co_switch_stack:\n"
-    "push %rbp; push %rbx; push %r12;\n"
-    "push %r13; push %r14; push %r15;\n"
-    "mov  %rsp, (%rdi);\n"
-    "mov  %rsi, %rsp;\n"
-    "pop  %r15; pop  %r14; pop  %r13;\n"
-    "pop  %r12; pop  %rbx; pop  %rbp;\n"
-    "retq;"
-    );
-
-// initial and link guest to the run-queue
-  struct co *
-co_create(const u64 stacksize, void (*func)(void), void * priv)
-{
-  struct co * const co = yalloc(stacksize);
-  if (co == NULL)
-    return NULL;
-
-#if COSTACKCHECK
-  // check stack usage
-  memset((void *)co, 0x5c, stacksize);
-  printf("stack-space %lu\n", stacksize - sizeof(struct co));
-#endif
-
-  u64 * rsp = ((u64 *)(((u8*)co) + stacksize)) - 10;
-  for (u64 i = 0; i < 6; i++)
-    rsp[i] = 0;
-  rsp[6] = (u64)func;
-  rsp[7] = (u64)co_exit;
-  rsp[8] = (u64)debug_die;
-
-  co->rsp = (u64)rsp;
-  co->priv = priv;
-
-  if (co_head) { // non-empty
-    co->next = co_head;
-    co->prev = co_head->prev;
-    co_head->prev->next = co;
-    co_head->prev = co;
-  } else { // empty
-    co->next = co->prev = co_head = co;
-  }
-  co_nr++;
-  return co;
-}
-
-  inline void *
-co_priv(void)
-{
-  return co_curr->priv;
-}
-
-  inline u64
-co_count(void)
-{
-  return co_nr;
-}
-
-  inline void
-co_exec(const bool host)
-{
-  if (co_head == NULL)
-    return;
-  co_curr = co_head;
-  if (host == false) {
-    co_switch_stack(&co_host_rsp, co_head->rsp);
-    debug_assert(co_head == NULL);
-  } else {
-    co_host.priv = NULL;
-    co_host.next = co_head;
-    co_host.prev = co_head->prev;
-    co_head->prev->next = &co_host;
-    co_head->prev = &co_host;
-    co_switch_stack(&(co_host.rsp), co_head->rsp);
-  }
-}
-
-  inline void
-co_reset(void)
-{
-  co_curr = NULL;
-  co_head = NULL;
-  co_nr = 0;
-}
-
-// directly switch to the next co; no scheduling
-  inline void
-co_yield(void)
-{
-  debug_assert(co_curr);
-  struct co * const to = co_curr->next;
-  debug_assert(to);
-  if (to != co_curr) {
-    struct co * const save = co_curr;
-    co_curr = to;
-    co_switch_stack(&(save->rsp), to->rsp);
-  }
-}
-
-// safe to be called from a non-coroutine environment (cost a condition branch)
-  inline void
-co_yield_safe(void)
-{
-  if (co_curr && co_nr)
-    co_yield();
-}
-
-  inline void
-co_prefetchr_yield_safe(const void * const ptr, const int hint)
-{
-  cpu_prefetchr(ptr, hint);
-  co_yield_safe();
-}
-
-// for guest to terminate execution
-  inline void
-co_exit(void)
-{
-#if COSTACKCHECK
-  u8 * ptr = (u8 *)(co_curr + 1);
-  while ((*ptr) == 0x5c)
-    ptr++;
-  const u8 * const limit = (u8 *)(co_curr + 1);
-  printf("co-limit %p max-reached %p distance %lu\n", limit, ptr, ptr - limit);
-#endif
-
-  struct co * const victim = co_curr;
-  co_nr--;
-  if (victim->next != victim) {
-    if (co_head == victim)
-      co_head = victim->next;
-    victim->next->prev = victim->prev;
-    victim->prev->next = victim->next;
-    co_yield();
-  } else { // the last co
-    co_head = NULL;
-    co_curr = NULL;
-    co_switch_stack(&(victim->rsp), co_host_rsp);
-  }
-  debug_die();
-}
-#endif //__x86_64__
-// }}} co-routine
-
 // locking {{{
+
 // spinlock {{{
 static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "lock size");
 
@@ -1025,6 +852,60 @@ spinlock_unlock(spinlock * const lock)
   pthread_spin_unlock(p);
 }
 // }}} spinlock
+
+// pthread mutex {{{
+static_assert(sizeof(pthread_mutex_t) <= sizeof(mutexlock), "lock size");
+  inline void
+mutexlock_init(mutexlock * const lock)
+{
+  pthread_mutex_t * const p = (typeof(p))lock;
+  pthread_mutex_init(p, NULL);
+}
+
+  inline void
+mutexlock_lock(mutexlock * const lock)
+{
+  pthread_mutex_t * const p = (typeof(p))lock;
+#pragma nounroll
+  do {
+    const int r = pthread_mutex_lock(p);
+    if (r == 0)
+      return;
+    else if (r != EAGAIN)
+      debug_die();
+  } while (true);
+}
+
+  inline bool
+mutexlock_trylock(mutexlock * const lock)
+{
+  pthread_mutex_t * const p = (typeof(p))lock;
+#pragma nounroll
+  do {
+    const int r = pthread_mutex_trylock(p);
+    if (r == 0)
+      return true;
+    else if (r == EBUSY)
+      return false;
+    else if (r != EAGAIN)
+      debug_die();
+  } while (true);
+}
+
+  inline void
+mutexlock_unlock(mutexlock * const lock)
+{
+  pthread_mutex_t * const p = (typeof(p))lock;
+#pragma nounroll
+  do {
+    const int r = pthread_mutex_unlock(p);
+    if (r == 0)
+      return;
+    else if ((r != EAGAIN))
+      debug_die();
+  } while (true);
+}
+// }}} pthread mutex
 
 // rwlock {{{
 typedef au32 lock_t;
@@ -1150,60 +1031,301 @@ rwlock_write_to_read(rwlock * const lock)
 #undef RWLOCK_WBIT
 // }}} rwlock
 
-// pthread mutex {{{
-static_assert(sizeof(pthread_mutex_t) <= sizeof(mutexlock), "lock size");
-  inline void
-mutexlock_init(mutexlock * const lock)
-{
-  pthread_mutex_t * const p = (typeof(p))lock;
-  pthread_mutex_init(p, NULL);
-}
-
-  inline void
-mutexlock_lock(mutexlock * const lock)
-{
-  pthread_mutex_t * const p = (typeof(p))lock;
-#pragma nounroll
-  do {
-    const int r = pthread_mutex_lock(p);
-    if (r == 0)
-      return;
-    else if (r != EAGAIN)
-      debug_die();
-  } while (true);
-}
-
-  inline bool
-mutexlock_trylock(mutexlock * const lock)
-{
-  pthread_mutex_t * const p = (typeof(p))lock;
-#pragma nounroll
-  do {
-    const int r = pthread_mutex_trylock(p);
-    if (r == 0)
-      return true;
-    else if (r == EBUSY)
-      return false;
-    else if (r != EAGAIN)
-      debug_die();
-  } while (true);
-}
-
-  inline void
-mutexlock_unlock(mutexlock * const lock)
-{
-  pthread_mutex_t * const p = (typeof(p))lock;
-#pragma nounroll
-  do {
-    const int r = pthread_mutex_unlock(p);
-    if (r == 0)
-      return;
-    else if ((r != EAGAIN))
-      debug_die();
-  } while (true);
-}
-// }}} pthread mutex
 // }}} locking
+
+// coroutine {{{
+
+#if defined(__x86_64__)
+
+// co {{{
+// number pushes in co_switch_stack
+#define CO_CONTEXT_SIZE ((6))
+
+// for switch/exit: pass a return value to the target
+asm (
+    ".global co_switch_stack;"
+    ".type co_switch_stack, @function;"
+    ".align 16;"
+    "co_switch_stack:"
+    "push %rbp; push %rbx; push %r12;"
+    "push %r13; push %r14; push %r15;"
+    "mov  %rsp, (%rdi);"
+    "mov  %rsi, %rsp;"
+    "pop  %r15; pop  %r14; pop  %r13;"
+    "pop  %r12; pop  %rbx; pop  %rbp;"
+    "mov  %rdx, %rax;"
+    "retq;"
+    );
+
+struct co {
+  u64 rsp;
+  void * priv;
+  u64 * host; // set host to NULL to exit
+  size_t stksz;
+};
+
+static __thread struct co * volatile co_curr = NULL; // NULL in host
+
+// the stack sits under the struct co
+  static void
+co_init(struct co * const co, void * func, void * priv, u64 * const host,
+    const u64 stacksize, void * func_exit)
+{
+  u64 * rsp = ((u64 *)co) - 4;
+  rsp[0] = (u64)func;
+  rsp[1] = (u64)func_exit;
+  rsp[2] = (u64)debug_die;
+  rsp[3] = 0;
+
+  rsp -= CO_CONTEXT_SIZE;
+
+  co->rsp = (u64)rsp;
+  co->priv = priv;
+  co->host = host;
+  co->stksz = stacksize;
+}
+
+  static void
+co_exit0(void)
+{
+  co_exit(0);
+}
+
+  struct co *
+co_create(const u64 stacksize, void * func, void * priv, u64 * const host)
+{
+  const size_t alloc_size = stacksize + sizeof(struct co);
+  u8 * const mem = yalloc(alloc_size);
+  if (mem == NULL)
+    return NULL;
+
+#if COSTACKCHECK
+  memset(mem, 0x5c, stacksize);
+#endif
+
+  struct co * const co = (typeof(co))(mem + stacksize);
+  co_init(co, func, priv, host, stacksize, co_exit0);
+  return co;
+}
+
+  inline void
+co_reuse(struct co * const co, void * func, void * priv, u64 * const host)
+{
+  co_init(co, func, priv, host, co->stksz, co_exit0);
+}
+
+  inline struct co *
+co_fork(void * func, void * priv)
+{
+  return co_curr ? co_create(co_curr->stksz, func, priv, co_curr->host) : NULL;
+}
+
+  inline void *
+co_priv(void)
+{
+  return co_curr ? co_curr->priv : NULL;
+}
+
+// the host calls this to enter a coroutine.
+  inline u64
+co_enter(struct co * const to, const u64 retval)
+{
+  debug_assert(co_curr == NULL); // must entry from the host
+  debug_assert(to && to->host);
+  u64 * const save = to->host;
+  co_curr = to;
+  const u64 ret = co_switch_stack(save, to->rsp, retval);
+  co_curr = NULL;
+  return ret;
+}
+
+// switch from a coroutine to another coroutine
+// co_curr must be valid
+// the target will resume and receive the retval
+  inline u64
+co_switch_to(struct co * const to, const u64 retval)
+{
+  debug_assert(co_curr);
+  debug_assert(co_curr != to);
+  debug_assert(to && to->host);
+  struct co * const save = co_curr;
+  co_curr = to;
+  return co_switch_stack(&(save->rsp), to->rsp, retval);
+}
+
+// switch from a coroutine to the host routine
+// co_yield is now a c++ keyword...
+  inline u64
+co_back(const u64 retval)
+{
+  debug_assert(co_curr);
+  struct co * const save = co_curr;
+  co_curr = NULL;
+  return co_switch_stack(&(save->rsp), *(save->host), retval);
+}
+
+// return to host and set host to NULL
+__attribute__((noreturn))
+  void
+co_exit(const u64 retval)
+{
+  debug_assert(co_curr);
+  const u64 hostrsp = *(co_curr->host);
+  co_curr->host = NULL;
+  struct co * const save = co_curr;
+  co_curr = NULL;
+  (void)co_switch_stack(&(save->rsp), hostrsp, retval);
+  // return to co_enter
+  debug_die();
+}
+
+// host is set to NULL on exit
+  inline bool
+co_valid(struct co * const co)
+{
+  return co->host != NULL;
+}
+
+// return NULL on host
+  inline struct co *
+co_self(void)
+{
+  return co_curr;
+}
+
+  inline void
+co_destroy(struct co * const co)
+{
+  u8 * const mem = ((u8 *)co) - co->stksz;
+  free(mem);
+}
+// }}} co
+
+// corr {{{
+
+struct corr {
+  struct co co;
+  struct corr * next;
+  struct corr * prev;
+};
+
+//static __thread struct corr * corr_head = NULL; // NULL in host
+
+// co-routine
+
+// initial and link guest to the run-queue
+  struct corr *
+corr_create(const u64 stacksize, void * func, void * priv, u64 * const host)
+{
+  const size_t alloc_size = stacksize + sizeof(struct corr);
+  u8 * const mem = yalloc(alloc_size);
+  if (mem == NULL)
+    return NULL;
+
+#if COSTACKCHECK
+  memset(mem, 0x5c, stacksize);
+#endif
+
+  struct corr * const co = (typeof(co))(mem + stacksize);
+  co_init(&(co->co), func, priv, host, stacksize, corr_exit);
+  co->next = co;
+  co->prev = co;
+  return co;
+}
+
+  struct corr *
+corr_link(const u64 stacksize, void * func, void * priv, struct corr * const prev)
+{
+  const size_t alloc_size = stacksize + sizeof(struct corr);
+  u8 * const mem = yalloc(alloc_size);
+  if (mem == NULL)
+    return NULL;
+
+#if COSTACKCHECK
+  memset(mem, 0x5c, stacksize);
+#endif
+
+  struct corr * const co = (typeof(co))(mem + stacksize);
+  co_init(&(co->co), func, priv, prev->co.host, stacksize, corr_exit);
+  co->next = prev->next;
+  co->prev = prev;
+  co->prev->next = co;
+  co->next->prev = co;
+  return co;
+}
+
+  inline void
+corr_reuse(struct corr * const co, void * func, void * priv, u64 * const host)
+{
+  co_init(&(co->co), func, priv, host, co->co.stksz, corr_exit);
+  co->next = co;
+  co->prev = co;
+}
+
+  inline void
+corr_relink(struct corr * const co, void * func, void * priv, struct corr * const prev)
+{
+  co_init(&(co->co), func, priv, prev->co.host, co->co.stksz, corr_exit);
+  co->next = prev->next;
+  co->prev = prev;
+  co->prev->next = co;
+  co->next->prev = co;
+}
+
+  inline void
+corr_enter(struct corr * const co)
+{
+  (void)co_enter(&(co->co), 0);
+}
+
+  inline void
+corr_yield(void)
+{
+  struct corr * const curr = (typeof(curr))co_curr;
+  debug_assert(curr);
+  if (curr && (curr->next != curr))
+    (void)co_switch_to(&(curr->next->co), 0);
+}
+
+__attribute__((noreturn))
+  inline void
+corr_exit(void)
+{
+  debug_assert(co_curr);
+#if COSTACKCHECK
+  u8 * ptr = ((u8 *)(co_curr)) - co_curr->stksz;
+  while ((*ptr) == 0x5c)
+    ptr++;
+  const u64 used = ((u8 *)co_curr) - ptr;
+  fprintf(stderr, "%s stack usage %lu\n", __func__, used);
+#endif
+
+  struct corr * const curr = (typeof(curr))co_curr;
+  if (curr->next != curr) { // have more corr
+    struct corr * const next = curr->next;
+    struct corr * const prev = curr->prev;
+    next->prev = prev;
+    prev->next = next;
+    curr->next = NULL;
+    curr->prev = NULL;
+    curr->co.host = NULL; // invalidate
+    (void)co_switch_to(&(next->co), 0);
+  } else { // the last corr
+    co_exit0();
+  }
+  debug_die();
+}
+
+  inline void
+corr_destroy(struct corr * const co)
+{
+  co_destroy(&(co->co));
+}
+// }}} corr
+
+#endif //__x86_64__
+
+// }}} co
 
 // bits {{{
   inline u32
@@ -1271,6 +1393,12 @@ bits_p2_down(const u64 v)
 bits_round_up(const u64 v, const u8 power)
 {
   return (v + (1lu << power) - 1lu) >> power << power;
+}
+
+  inline u64
+bits_round_up_a(const u64 v, const u64 a)
+{
+  return (v + a - 1) / a * a;
 }
 
   inline u64
@@ -2172,29 +2300,29 @@ damp_destroy(struct damp * const d)
 
 // vctr {{{
 struct vctr {
-  u64 nr;
+  size_t nr;
   union {
-    u64 v;
-    au64 av;
+    size_t v;
+    atomic_size_t av;
   } u[];
 };
 
   struct vctr *
-vctr_create(const u64 nr)
+vctr_create(const size_t nr)
 {
   struct vctr * const v = calloc(1, sizeof(*v) + (sizeof(v->u[0]) * nr));
   v->nr = nr;
   return v;
 }
 
-  inline u64
+  inline size_t
 vctr_size(struct vctr * const v)
 {
   return v->nr;
 }
 
   inline void
-vctr_add(struct vctr * const v, const u64 i, const u64 n)
+vctr_add(struct vctr * const v, const u64 i, const size_t n)
 {
   if (i < v->nr)
     v->u[i].v += n;
@@ -2208,7 +2336,7 @@ vctr_add1(struct vctr * const v, const u64 i)
 }
 
   inline void
-vctr_add_atomic(struct vctr * const v, const u64 i, const u64 n)
+vctr_add_atomic(struct vctr * const v, const u64 i, const size_t n)
 {
   if (i < v->nr)
     (void)atomic_fetch_add(&(v->u[i].av), n);
@@ -2222,13 +2350,13 @@ vctr_add1_atomic(struct vctr * const v, const u64 i)
 }
 
   inline void
-vctr_set(struct vctr * const v, const u64 i, const u64 n)
+vctr_set(struct vctr * const v, const u64 i, const size_t n)
 {
   if (i < v->nr)
     v->u[i].v = n;
 }
 
-  u64
+  size_t
 vctr_get(struct vctr * const v, const u64 i)
 {
   return (i < v->nr) ?  v->u[i].v : 0;
@@ -2237,7 +2365,7 @@ vctr_get(struct vctr * const v, const u64 i)
   void
 vctr_merge(struct vctr * const to, const struct vctr * const from)
 {
-  const u64 nr = to->nr < from->nr ? to->nr : from->nr;
+  const size_t nr = to->nr < from->nr ? to->nr : from->nr;
   for (u64 i = 0; i < nr; i++)
     to->u[i].v += from->u[i].v;
 }
@@ -2656,6 +2784,7 @@ zeta_range(const u64 start, const u64 count, const double theta)
   thread_fork_join(nth, zeta_range_worker, false, zi);
   for (u64 i = 0; i < nth; i++)
     sum += zi->sums[i];
+  free(zi);
   return sum;
 }
 
@@ -3783,6 +3912,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     infov[i] = &(info[i]);
     info[i].thread_func = pi->wf;
     info[i].api = pi->api;
+    info[i].map = pi->map;
     info[i].gen = rgen_dup(pi->gen0);
     info[i].seed = (i + 73) * 117;
     info[i].end_type = end_type;
