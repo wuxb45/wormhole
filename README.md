@@ -117,7 +117,8 @@ For example:
 
 ### The thread-unsafe API
 A set of *thread-unsafe* functions are also provided. See the functions with _prefix_ `whunsafe`.
-The thread-unsafe functions don't use the reference (_wormref_). Simply feed it with the pointer to the wormhole index:
+The thread-unsafe functions don't use the reference (_wormref_).
+Simply feed them with the pointer to the wormhole index:
 
     index = whunsafe_create(NULL);
     for (...) {
@@ -192,7 +193,7 @@ This also allows users to use stack-allocated variables to interact with Wormhol
 The memory manager of the internal key-value objects can be customized when creating a new Wormhole (see `wormhole_create`).
 The customization will _only_ affect the internal `struct kv` objects.
 Actually, the memory manager can be configured to directly use the caller's `struct kv` object and store it in Wormhole.
-This `struct kvmap_mm` structure shows how to do this:
+This `struct kvmap_mm` structure shows an example:
 
     const struct kvmap_mm kvmap_mm_ualloc {
       .in = kvmap_mm_in_noop, // in wormhole_set(), store caller's kv in wh
@@ -201,6 +202,12 @@ This `struct kvmap_mm` structure shows how to do this:
     };
     ...
     struct wormhole * wh = wormhole_create(&kvmap_mm_ualloc);
+    struct wormref * ref = wormhole_ref(wh);
+    ...
+    struct kv * newkv = malloc(size);
+    ...
+    wormhole_set(ref, newkv);
+    // Don't free newkv! it's now managed by wh
 
 Each of the in/out/free functions can be freely customized.
 A few `kvmap_mm_*` functions are already provided for common scenarios.
