@@ -13,12 +13,14 @@ char * __buf = NULL;
 size_t __size = 0;
 struct kv * __kv = NULL;
 struct kv * __out = NULL;
+struct kref __kref;
 
   static void
 scan_trace(FILE * const input)
 {
   rewind(input);
   u64 count = 0;
+  __buf = NULL;
   while (getline(&__buf, &__size, input) > 0) count++;
   printf("#lines %lu\n", count);
   free(__buf);
@@ -48,10 +50,8 @@ wh_get(struct wormref * const ref, FILE * input)
   rewind(input);
   u64 hit = 0;
   while (fgets(__buf, __size, input)) {
-    __kv->klen = strlen(__buf);
-    __kv->vlen = 0;
-    kv_update_hash(__kv);
-    if (wormhole_get(ref, __kv, __out))
+    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    if (wormhole_get(ref, &__kref, __out))
       hit++;
   }
   printf("get hit %lu (== #lines)\n", hit);
@@ -63,10 +63,8 @@ wh_probe(struct wormref * const ref, FILE * input)
   rewind(input);
   u64 hit = 0;
   while (fgets(__buf, __size, input)) {
-    __kv->klen = strlen(__buf);
-    __kv->vlen = 0;
-    kv_update_hash(__kv);
-    if (wormhole_probe(ref, __kv))
+    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    if (wormhole_probe(ref, &__kref))
       hit++;
   }
   printf("probe hit %lu (== #lines)\n", hit);
@@ -88,10 +86,8 @@ wh_iter(struct wormref * const ref, FILE * input)
   do {
     if (fgets(__buf, __size, input) == NULL)
       break;
-    __kv->klen = strlen(__buf);
-    __kv->vlen = 0;
-    kv_update_hash(__kv);
-    wormhole_iter_seek(iter, __kv);
+    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    wormhole_iter_seek(iter, &__kref);
     for (u64 i = 0; i < 100; i++) {
       if (wormhole_iter_next(iter, tmp1))
         count++;
@@ -113,10 +109,8 @@ wh_del(struct wormref * const ref, FILE * input)
   rewind(input);
   u64 hit = 0;
   while (fgets(__buf, __size, input)) {
-    __kv->klen = strlen(__buf);
-    __kv->vlen = 0;
-    kv_update_hash(__kv);
-    if (wormhole_del(ref, __kv))
+    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    if (wormhole_del(ref, &__kref))
       hit++;
   }
   printf("del hit %lu (== unique keys)\n", hit);

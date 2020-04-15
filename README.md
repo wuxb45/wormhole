@@ -8,7 +8,7 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
 ## Highlights:
-* Thread-safety: all operations, including `get`, `set`, `inplace-update`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
+* Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
 * No background threads or global status. Wormhole uses a mix of user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
@@ -56,16 +56,17 @@ It generates six-word keys based on a word list (words.txt). See `sprintf` in `c
 
 # The code
 
-## `struct kv`
+## `struct kv` and `struct kref`
 
-Please refer to demo1.c for quick examples of how to manipulate the *key-value* objects (`struct kv`).
-The `struct kv` is also used to represent a *key*, where the value portion is simply ignored.
-There are a handful of helper functions (`kv_*` functions) provided in wh.c.
+Please refer to demo1.c for quick examples of how to manipulate the *key-value* (`struct kv`)
+and the *key-reference* (`struct kref`).
+There are a handful of helper functions (`kv_*` and `kref_*` functions) at the beginning of wh.h.
 
-It's worth noting that the *key's hash* in a `struct kv` must be up-to-date before the key in the
-`struct kv` object is used by wormhole functions.
+It's worth noting that the *key's hash* (`hash` of `struct kv` and `hash32` of `struct kref`)
+must be up-to-date before passed to wormhole.
 The `kv_refill*` helper functions internally update the hash after filling the kv contents.
-In a more general case, `kv_update_hash` directly updates the key's hash.
+In a more general case, `kv_update_hash` directly updates a `struct kv`'s hash.
+Similarly, `kref_refill_hash32()` calculates the 32-bit hash for `struct kref`.
 
 ## The Wormhole API
 
@@ -129,7 +130,7 @@ The thread-unsafe functions don't use the reference (_wormref_). Simply feed it 
     wormhole_destroy(index);
 
 ### In-place update with user-defined function
-`wormhole_inplace` executes a user-defined function on an existing key-value item.
+`wormhole_inp` executes a user-defined function on an existing key-value item.
 If the key does not exist, a NULL pointer will be passed to the user-defined function.
 A simple example would be incrementing a counter stored in a key-value pair.
 
@@ -146,16 +147,14 @@ A simple example would be incrementing a counter stored in a key-value pair.
     u64 zero = 0;
     struct kv * tmp = kv_create("counter", 7, &zero, 8); // malloc-ed
     wormhole_set(ref, tmp);
-    free(tmp);
 
-    // perform +1
-    struct kv * key = kv_create("counter", 7, NULL, 0); // malloc-ed
-    wormhole_inplace(ref, key, myadd1, NULL);
-    free(key);
+    // perform +1 on the stored value
+    struct kref kref = kv_ref(tmp); // create a kref of tmp
+    wormhole_inp(ref, &kref, myadd1, NULL);
 
 Note that the user-defined function should ONLY change the value's content, and nothing else.
 Otherwise, the index can be corrupted.
-A similar mechanism is also provided for iterators (`wormhole_iter_inplace`).
+A similar mechanism is also provided for iterators (`wormhole_iter_inp`).
 
 The inplace function can also be used to retrieve key-value data. For example:
 
@@ -169,28 +168,42 @@ The inplace function can also be used to retrieve key-value data. For example:
       }
     }
     ...
+    struct kref kref = ...
     u64 val;
-    wormhole_inplace(ref, key, inplace_getu64, &val);
+    wormhole_inp(ref, &kref, inplace_getu64, &val);
 
 ### Iterator
-The `wormhole_iter_{seek,peek,skip,next,inplace}` functions provide range-search functionalities.
+The `wormhole_iter_{seek,peek,skip,next,inp}` functions provide range-search functionalities.
 If the search key does not exist, the `seek` operation will put the cursor on the item that is greater than the search-key.
-`next` will return the item under the current cursor and move the cursor forward. `peek` is similar but does not move the cursor. For example, with keys `{1,3,5}`, `seek(2); r = next()` will see `r == 3`.
+`next` will return the item under the current cursor and move the cursor forward.
+`peek` is similar but does not move the cursor. For example, with keys `{1,3,5}`, `seek(2); r = next()` will see `r == 3`.
 
 Currently Wormhole does not provide `seek_for_less_equal()` and `prev()` for backward scanning. This feature will be added in the future.
 
 # Memory management
 
-Wormhole manages all the key-value data internally and only copies to or from a user-supplied
+By default, Wormhole manages all the key-value data internally and only copies to or from a user-supplied
 buffer (a `struct kv` object).
 This draws a clear boundary in the memory space between the index structure and its users.
 After a call to any of the index operations, the caller can immediately free
-the buffer holding the key or the key-value data.
-This also allows users to use stack-allocated `struct kv` objects to interact with Wormhole.
+the buffer holding the key-reference or the key-value data.
+This also allows users to use stack-allocated variables to interact with Wormhole.
 
-The memory allocator for the internal key-value data can be customized when the index is created/initialized (see `wormhole_create`).
-The allocator will _only_ be used for allocating the internal key-value data (the `struct kv` objects),
-but not the other objects in Wormhole, such as hash table and tree nodes.
+The memory manager of the internal key-value objects can be customized when creating a new Wormhole (see `wormhole_create`).
+The customization will _only_ affect the internal `struct kv` objects.
+Actually, the memory manager can be configured to directly use the caller's `struct kv` object and store it in Wormhole.
+This `struct kvmap_mm` structure shows how to do this:
+
+    const struct kvmap_mm kvmap_mm_ualloc {
+      .in = kvmap_mm_in_noop, // in wormhole_set(), store caller's kv in wh
+      .out = kvmap_mm_out_dup, // but still make a copy in wormhole_get()
+      .free = kvmap_mm_free_free, // call free() for delete/update
+    };
+    ...
+    struct wormhole * wh = wormhole_create(&kvmap_mm_ualloc);
+
+Each of the in/out/free functions can be freely customized.
+A few `kvmap_mm_*` functions are already provided for common scenarios.
 
 ## Hugepages
 Wormhole uses hugepages when available. To reserve some hugepages in Linux (10000 * 2MB):

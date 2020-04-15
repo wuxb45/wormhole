@@ -4,28 +4,36 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #define _GNU_SOURCE
+#include "lib.h"
+#include "wh.h"
+#include "ctypes.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <stdatomic.h>
 #include <byteswap.h>
-#include "lib.h"
-#include "wh.h"
 
-atomic_uint_least64_t seqno = 0;
+au64 seqno = 0;
 u64 nloader = 0;
 struct kv ** keys = NULL;
 u64 nkeys = 0;
-atomic_uint_least64_t tot = 0;
-atomic_uint_least64_t wfail = 0;
+au64 tot = 0;
+au64 wfail = 0;
 u64 endtime = 0;
 
+struct kvmap_info {
+  const struct kvmap_api * api;
+  void * map;
+  bool has_iter;
+};
+
   static void *
-kv_load_worker(struct wormhole * const wh)
+kv_load_worker(const struct kvmap_info * const info)
 {
+  const struct kvmap_api * const api = info->api;
+  void * const map = info->map;
   srandom_u64(time_nsec() * time_nsec() * time_nsec());
-  struct wormref * const ref = wormhole_ref(wh);
+  void * const ref = kvmap_ref(api, map);
   const u64 seq = atomic_fetch_add(&seqno, 1);
   const u64 n0 = nkeys / nloader * seq;
   const u64 nz = (seq == (nloader - 1)) ? nkeys : (nkeys / nloader * (seq + 1));
@@ -50,28 +58,29 @@ kv_load_worker(struct wormhole * const wh)
     keys[i] = kv_create(buf, klen, buf, 8);
     if (keys[i] == NULL)
       exit(0);
-    wormhole_set(ref, keys[i]);
+    kvmap_kv_set(api, ref, keys[i]);
   }
   free(buf);
   rgen_destroy(gi);
-  wormhole_unref(ref);
+  kvmap_unref(api, ref);
   return NULL;
 }
 
   static void *
-kv_unload_worker(struct wormhole * const wh)
+kv_unload_worker(const struct kvmap_info * const info)
 {
-  struct wormref * const ref = wormhole_ref(wh);
+  const struct kvmap_api * const api = info->api;
+  void * const map = info->map;
   const u64 seq = atomic_fetch_add(&seqno, 1);
   const u64 n0 = nkeys / nloader * seq;
   const u64 nz = (seq == (nloader - 1)) ? nkeys : (nkeys / nloader * (seq + 1));
-  //printf("unload worker %lu %lu\n", n0, nz-1);
 
+  void * const ref = kvmap_ref(api, map);
   for (u64 i = n0; i < nz; i++) {
-    wormhole_del(ref, keys[i]);
+    kvmap_kv_del(api, ref, keys[i]);
     free(keys[i]);
   }
-  wormhole_unref(ref);
+  kvmap_unref(api, ref);
   return NULL;
 }
 
@@ -86,11 +95,13 @@ kv_plus1(struct kv * const kv0, void * const priv)
 }
 
   static void *
-kv_probe_worker(struct wormhole * const wh)
+kv_stress_worker(const struct kvmap_info * const info)
 {
+  const struct kvmap_api * const api = info->api;
+  void * const map = info->map;
   srandom_u64(time_nsec() * time_nsec() * time_nsec());
-  struct wormref * ref = wormhole_ref(wh);
-  const bool rgen_sel = time_nsec() & 1;
+  void * ref = kvmap_ref(api, map);
+  const bool rgen_sel = (random_u64() & 0x1000) == 0;
   struct rgen * const gi = rgen_sel ? rgen_new_uniform(0, nkeys-1) : rgen_new_zipfian(0, nkeys-1);
   struct kv * next = keys[rgen_next_wait(gi)];
   u64 rnext = rgen_next_wait(gi);
@@ -98,7 +109,7 @@ kv_probe_worker(struct wormhole * const wh)
   debug_assert(getbuf);
   struct sbuf * const sbuf = malloc(1000);
   debug_assert(sbuf);
-  struct wormhole_iter * iter;
+  void * iter = NULL;
   u64 wfail1 = 0;
 #define BATCHSIZE ((4096))
   do {
@@ -118,33 +129,36 @@ kv_probe_worker(struct wormhole * const wh)
       //ctrs[r]++;
       switch (r) {
       case 0: case 1:
-        (void)wormhole_probe(ref, key);
+        kvmap_kv_probe(api, ref, key);
         break;
       case 2: case 3:
-        (void)wormhole_get(ref, key, getbuf);
+        kvmap_kv_get(api, ref, key, getbuf);
         break;
       case 4: case 5: case 6:
-        iter = wormhole_iter_create(ref);
-        debug_assert(iter);
-        wormhole_iter_seek(iter, key);
-        wormhole_iter_next(iter, getbuf);
-        wormhole_iter_peek(iter, getbuf);
-        wormhole_iter_skip(iter, 2);
-        wormhole_iter_inplace(iter, kv_plus1, NULL);
-        wormhole_iter_destroy(iter);
+        if (info->has_iter) {
+          iter = api->iter_create(ref);
+          debug_assert(iter);
+          kvmap_kv_iter_seek(api, iter, key);
+          api->iter_next(iter, getbuf);
+          api->iter_peek(iter, getbuf);
+          api->iter_skip(iter, 2);
+          api->iter_inp(iter, kv_plus1, NULL);
+          api->iter_destroy(iter);
+        }
         break;
       case 7: case 8:
-        (void)wormhole_unref(ref);
-        ref = wormhole_ref(wh);
+        (void)kvmap_unref(api, ref);
+        ref = kvmap_ref(api, map);
         break;
       case 9: case 10:
-        (void)wormhole_del(ref, key);
+        (void)kvmap_kv_del(api, ref, key);
         break;
       case 11: case 12:
-        wormhole_inplace(ref, key, kv_plus1, NULL);
+        if (api->inp)
+          kvmap_kv_inp(api, ref, key, kv_plus1, NULL);
         break;
       case 13: case 14: case 15:
-        if (!wormhole_set(ref, key))
+        if (!kvmap_kv_set(api, ref, key))
           wfail1++;
         break;
       default:
@@ -154,50 +168,82 @@ kv_probe_worker(struct wormhole * const wh)
     tot += BATCHSIZE;
   } while (time_nsec() < endtime);
   wfail += wfail1;
-  wormhole_unref(ref);
+  kvmap_unref(api, ref);
   rgen_destroy(gi);
   free(getbuf);
   free(sbuf);
   return NULL;
 }
 
+  static void
+helper_msg(void)
+{
+  fprintf(stderr, "usage: [api ...] <#keys> [<#load-/unload-threads>=1] [<#threads>=1] [<rounds>=10] [<epochs>=10]\n");
+  kvmap_api_helper_message();
+}
 
   int
 main(int argc, char ** argv)
 {
-  if (argc < 2) {
-    fprintf(stderr, "usage: <#keys> [<#load-/unload-threads>=1] [<#threads>=1] [<rounds>=10] [<epochs>=10]\n");
-    return 0;
-  }
-
-  // gen keys and load (4)
-  struct wormhole * const wh = wormhole_create(NULL);
-  if (wh == NULL) {
-    fprintf(stderr, "wormhole_create failed\n");
+  argc--;
+  argv++;
+  if (argc < 1) {
+    helper_msg();
     exit(0);
   }
 
+  const struct kvmap_api * api = NULL;
+  void * map = NULL;
+  if (!strcmp(argv[0], "api")) {
+    const int n = kvmap_api_helper(argc, argv, NULL, true, &api, &map);
+    if (n > 0) {
+      argc -= n;
+      argv += n;
+    } else {
+      helper_msg();
+      exit(0);
+    }
+  } else {
+    api = &kvmap_api_wormhole;
+    map = wormhole_create(NULL);
+  }
+  const bool has_point = api->get && api->probe && api->del && api->set;
+  if (!has_point) {
+    fprintf(stderr, "api not supported\n");
+    exit(0);
+  }
+  if (!api->inp) {
+    fprintf(stderr, "inplace function not found: ignored\n");
+  }
+  const bool has_iter = api->iter_create && api->iter_seek && api->iter_peek &&
+                        api->iter_skip && api->iter_next && api->iter_inp && api->iter_destroy;
+  if (!has_iter) {
+    fprintf(stderr, "iter functions not complete: ignored\n");
+  }
+
   // generate keys
-  nkeys = a2u64(argv[1]);
+  nkeys = a2u64(argv[0]);
   keys = malloc(sizeof(struct kv *) * nkeys);
   debug_assert(keys);
-  nloader = (argc >= 3) ? a2u64(argv[2]) : 1; // # of loaders/unloaders
-  const u64 nworker = (argc >= 4) ? a2u64(argv[3]) : 1;
-  const u64 nrounds = (argc >= 5) ? a2u64(argv[4]) : 10; // default 10
-  const u64 nepochs = (argc >= 6) ? a2u64(argv[5]) : 10; // default 10
-  printf("stresstest: th %lu r %lu e %lu\n", nworker, nrounds, nepochs);
+  nloader = (argc >= 2) ? a2u64(argv[1]) : 1; // # of loaders/unloaders
+  const u64 nworker = (argc >= 3) ? a2u64(argv[2]) : 1;
+  const u64 nrounds = (argc >= 4) ? a2u64(argv[3]) : 10; // default 10
+  const u64 nepochs = (argc >= 5) ? a2u64(argv[4]) : 10; // default 10
+  printf("stresstest: nkeys %lu th %lu r %lu e %lu\n", nkeys, nworker, nrounds, nepochs);
+  struct kvmap_info info = {.api = api, .map = map, .has_iter = has_iter};
 
   for (u64 e = 0; e < nepochs; e++) {
     seqno = 0;
-    const u64 dtl = thread_fork_join(nloader, (void *)kv_load_worker, false, (void *)wh);
+    const u64 dtl = thread_fork_join(nloader, (void *)kv_load_worker, false, &info);
     printf("load th %lu mops %.2lf\n", nloader, ((double)nkeys) * 1e3 / ((double)dtl));
+    api->fprint(map, stdout);
 
     debug_perf_switch();
     for (u64 r = 0; r < nrounds; r++) {
       tot = 0;
       wfail = 0;
       endtime = time_nsec() + 2e9;
-      const u64 dt = thread_fork_join(nworker, (void *)kv_probe_worker, false, (void *)wh);
+      const u64 dt = thread_fork_join(nworker, (void *)kv_stress_worker, false, &info);
       const double mops = ((double)tot) * 1e3 / ((double)dt);
       char ts[64];
       time_stamp(ts, 64);
@@ -207,11 +253,11 @@ main(int argc, char ** argv)
       debug_perf_switch();
     }
     seqno = 0;
-    const u64 dtu = thread_fork_join(nloader, (void *)kv_unload_worker, false, (void *)wh);
+    const u64 dtu = thread_fork_join(nloader, (void *)kv_unload_worker, false, &info);
     printf("unload th %lu mops %.2lf\n", nloader, ((double)nkeys) *1e3 / ((double)dtu));
   }
 
   free(keys);
-  wormhole_destroy(wh);
+  api->destroy(map);
   return 0;
 }
