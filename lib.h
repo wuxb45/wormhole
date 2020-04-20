@@ -268,19 +268,19 @@ rwlock_write_to_read(rwlock * const lock);
 
 typedef union {
   u64 opqaue[8];
-} mutexlock;
+} mutex;
 
   extern void
-mutexlock_init(mutexlock * const lock);
+mutex_init(mutex * const lock);
 
   extern void
-mutexlock_lock(mutexlock * const lock);
+mutex_lock(mutex * const lock);
 
   extern bool
-mutexlock_trylock(mutexlock * const lock);
+mutex_trylock(mutex * const lock);
 
   extern void
-mutexlock_unlock(mutexlock * const lock);
+mutex_unlock(mutex * const lock);
 // }}} locking
 
 // coroutine {{{
@@ -372,7 +372,10 @@ bits_rotl_u32(const u32 v, const u64 n);
 bits_rotr_u32(const u32 v, const u64 n);
 
   extern u64
-bits_p2_up(const u64 v);
+bits_p2_up_u64(const u64 v);
+
+  extern u32
+bits_p2_up_u32(const u32 v);
 
   extern u64
 bits_p2_down(const u64 v);
@@ -383,7 +386,7 @@ bits_round_up(const u64 v, const u8 power);
   extern u64
 bits_round_up_a(const u64 v, const u64 a);
 
-  extern u64
+  extern u32
 vi128_estimate(const u64 v);
 
   extern u8 *
@@ -557,23 +560,17 @@ xlog_iter_next(struct xlog_iter * const iter, void * const out);
 
 // string {{{
 // size of out should be >= 10
-  extern void
-str10_u32(void * const out, const u32 v);
-
-// size of out should be >= 20
-  extern void
-str10_u64(void * const out, const u64 v);
-
-// size of out should be >= 8
-  extern void
-str16_u32(void * const out, const u32 v);
-
-// size of out should be >= 16
-  extern void
-str16_u64(void * const out, const u64 v);
-
   extern u64
 a2u64(const void * const str);
+
+  extern u32
+a2u32(const void * const str);
+
+  extern s64
+a2s64(const void * const str);
+
+  extern s32
+a2s32(const void * const str);
 
 // user should free returned ptr after use
   extern char **
@@ -660,8 +657,8 @@ extern struct rgen * rgen_new_const(const double percentile, const double range)
 extern struct rgen * rgen_new_exp(const double percentile, const double range);
 extern struct rgen * rgen_new_incs(const u64 min, const u64 max);
 extern struct rgen * rgen_new_incu(const u64 min, const u64 max);
-extern struct rgen * rgen_new_skips(const u64 min, const u64 max, const u64 inc);
-extern struct rgen * rgen_new_skipu(const u64 min, const u64 max, const u64 inc);
+extern struct rgen * rgen_new_skips(const u64 min, const u64 max, const s64 inc);
+extern struct rgen * rgen_new_skipu(const u64 min, const u64 max, const s64 inc);
 extern struct rgen * rgen_new_decs(const u64 min, const u64 max);
 extern struct rgen * rgen_new_decu(const u64 min, const u64 max);
 extern struct rgen * rgen_new_zipfian(const u64 min, const u64 max);
@@ -695,7 +692,7 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out);
 rgen_dup(struct rgen * const gen0);
 
   extern bool
-rgen_async_convert(struct rgen * const gen0, const u64 cpu);
+rgen_async_convert(struct rgen * const gen0, const u32 cpu);
 
   extern void
 rgen_async_wait(struct rgen * const gen);
@@ -763,42 +760,6 @@ qsbr_wait(struct qsbr * const q, const u64 target);
 qsbr_destroy(struct qsbr * const q);
 // }}} rcu
 
-// server {{{
-struct stream2 {
-  FILE * w;
-  FILE * r;
-};
-
-struct server;
-
-struct server_wi;
-
-  extern struct server *
-server_create(const char * const host, const int port, void*(*worker)(void * const), void * const priv);
-
-  extern void
-server_wait(struct server * const server);
-
-  extern void
-server_destroy(struct server * const server);
-
-  extern struct stream2 *
-server_wi_stream2(struct server_wi * const wi);
-
-  extern void *
-server_wi_private(struct server_wi * const wi);
-
-  extern void
-server_wi_destroy(struct server_wi * const wi);
-
-  extern struct stream2 *
-stream2_create(const char * const host, const int port);
-
-  extern void
-stream2_destroy(struct stream2 * const stream2);
-
-// }}} server
-
 // forker {{{
 #define FORKER_END_TIME ((0))
 #define FORKER_END_COUNT ((1))
@@ -826,13 +787,13 @@ struct forker_worker_info {
   const struct kvmap_api * api;
   void * map;
   void * priv;
-  u64 end_type;
+  u32 end_type;
   u64 end_magic;
   struct vctr * vctr;
   u64 worker_id; // <= conc
-  u64 conc; // number of threads
+  u32 conc; // number of threads
   // user args
-  u64 argc;
+  int argc;
   char ** argv;
   u64 seed;
   void * (*thread_func)(void *);
@@ -843,11 +804,11 @@ struct forker_worker_info {
 
   extern int
 forker_pass(const int argc, char ** const argv, char ** const pref,
-    struct pass_info * const pi, const u64 nr_wargs0);
+    struct pass_info * const pi, const int nr_wargs0);
 
   extern int
 forker_passes(int argc, char ** argv, char ** const pref0,
-    struct pass_info * const pi, const u64 nr_wargs0);
+    struct pass_info * const pi, const int nr_wargs0);
 
   extern void
 forker_passes_message(void);

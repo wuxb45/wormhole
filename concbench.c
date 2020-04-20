@@ -108,7 +108,7 @@ main(int argc, char ** argv)
     for (u64 j = 0; j < 6; j++)
       ss[j] = words[random() % nr_words];
     sprintf(buf, "%s %s %s %s %s %s!", ss[0], ss[1], ss[2], ss[3], ss[4], ss[5]);
-    samples[i] = kv_create_str(buf, "");
+    samples[i] = kv_create_str(buf, NULL, 0);
   }
   // free words & buf
   for (u64 i = 0; i < nr_words; i++)

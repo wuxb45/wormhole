@@ -68,16 +68,27 @@ key_size_align(const struct kv * const key, const u64 align);
 kv_update_hash(struct kv * const kv);
 
   extern void
-kv_refill(struct kv * const kv, const void * const key, const u32 klen, const void * const value, const u32 vlen);
+kv_refill(struct kv * const kv, const void * const key, const u32 klen,
+    const void * const value, const u32 vlen);
 
   extern void
-kv_refill_str_str(struct kv * const kv, const char * const key, const char * const value);
+kv_refill_str(struct kv * const kv, const char * const key,
+    const void * const value, const u32 vlen);
 
   extern void
-kv_refill_str_u64(struct kv * const kv, const char * const key, const u64 value);
+kv_refill_str_str(struct kv * const kv, const char * const key,
+    const char * const value);
+
+// the u64 key is filled in big-endian byte order
+  extern void
+kv_refill_u64(struct kv * const kv, const u64 key, const void * const value, const u32 vlen);
 
   extern void
 kv_refill_kref(struct kv * const kv, const struct kref * const kref);
+
+  extern void
+kv_refill_kref_v(struct kv * const kv, const struct kref * const kref,
+    const void * const value, const u32 vlen);
 
   extern struct kref
 kv_ref(const struct kv * const key);
@@ -86,7 +97,10 @@ kv_ref(const struct kv * const key);
 kv_create(const void * const key, const u32 klen, const void * const value, const u32 vlen);
 
   extern struct kv *
-kv_create_str(const char * const key, const char * const value);
+kv_create_str(const char * const key, const void * const value, const u32 vlen);
+
+  extern struct kv *
+kv_create_str_str(const char * const key, const char * const value);
 
 // a static kv with klen == 0
   extern const struct kv *
@@ -105,7 +119,7 @@ kv_dup2(const struct kv * const from, struct kv * const to);
 kv_dup2_key(const struct kv * const from, struct kv * const to);
 
   extern struct kv *
-kv_dup2_key_prefix(const struct kv * const from, struct kv * const to, const u64 plen);
+kv_dup2_key_prefix(const struct kv * const from, struct kv * const to, const u32 plen);
 
   extern bool
 kv_match(const struct kv * const key1, const struct kv * const key2);
@@ -188,17 +202,17 @@ typedef int (*kref_kv_cmp_func)(const struct kref *, const struct kv *);
 
 // ptr and len only
   extern void
-kref_refill_raw(struct kref * const s, const u8 * const ptr, const u32 len);
+kref_refill_raw(struct kref * const kref, const u8 * const ptr, const u32 len);
 
 // this calculates hash32
   extern void
-kref_refill_hash32(struct kref * const s, const u8 * const ptr, const u32 len);
+kref_refill_hash32(struct kref * const kref, const u8 * const ptr, const u32 len);
 
   extern bool
-kref_kv_match(const struct kref * const s, const struct kv * const k);
+kref_kv_match(const struct kref * const kref, const struct kv * const k);
 
   extern int
-kref_kv_compare(const struct kref * const s, const struct kv * const k);
+kref_kv_compare(const struct kref * const kref, const struct kv * const k);
 
   extern int
 kref_k128_compare(const struct kref * const sk, const u8 * const k128);
@@ -440,37 +454,6 @@ whunsafe_iter_destroy(struct wormhole_iter * const iter);
 
   extern void
 wormhole_fprint(struct wormhole * const map, FILE * const out);
-
-// verify & debugging
-  extern bool
-wormhole_verify(struct wormhole * const map);
-
-  extern void
-wormhole_dump_memory(struct wormhole * const map, const char * const filename, const char * const opt);
-
-  extern bool
-wormhole_merge_at(struct wormref * const ref, const struct kref * const key);
-
-  extern bool
-wormhole_split_at(struct wormref * const ref, const struct kref * const key);
-
-  extern void
-wormhole_sync_at(struct wormref * const ref, const struct kref * const key);
-
-  extern void
-wormhole_print_meta_anchors(struct wormhole * const map, const char * const pattern);
-
-  extern void
-wormhole_print_leaf_anchors(struct wormhole * const map, const char * const pattern);
-
-  extern void
-wormhole_print_meta_lrmost(struct wormhole * const map, const char * const pattern);
-
-  extern void *
-wormhole_jump_leaf_only(struct wormhole * const map, const struct kref * const key);
-
-  extern struct kv **
-wormhole_anchors(struct wormhole * const map);
 // }}} wormhole
 
 // kvmap_api {{{
