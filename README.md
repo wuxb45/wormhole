@@ -2,12 +2,13 @@
 
 The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered Index for In-memory Data Management"](https://www.cs.uic.edu/~wuxb/papers/wormhole.pdf) by Xingbo Wu, Fan Ni, and Song Jiang ([ACM DL](https://dl.acm.org/citation.cfm?id=3303955)).
 
-This repository maintains a reference implementation of the Wormhole index structure on x86\_64 Linux with SSE 4.2.
+This repository maintains a reference implementation of the Wormhole index structure on x86\_64 Linux/FreeBSD with SSE 4.2.
 The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
 
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
 ## Highlights:
+* (New) `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
 * Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
@@ -16,7 +17,7 @@ Experimental ARM64(AArch64) support has been added. The code has not been optimi
 # Build
 
 ## x86\_64
-Wormhole was developed & tested on x86\_64 Linux.
+Wormhole is developed & tested on x86\_64 Linux and FreeBSD.
 Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ make CCC=gcc`).
 On our testbed Clang usually produces faster code.
 
@@ -28,7 +29,7 @@ Alternatively, you may use `O=0g` to enable debug info and disable optimizations
 
     $ make O=0g
 
-Read `Makefile` for options on optimization and debugging levels (O=).
+Read `Makefile.common` for options on optimization and debugging levels (O=).
 
 ## ARM64 (experimental)
 
