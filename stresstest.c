@@ -11,7 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <byteswap.h>
 
 au64 seqno = 0;
 u64 nloader = 0;

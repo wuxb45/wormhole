@@ -22,6 +22,9 @@ HEADERS += ctypes
 
 FLG +=
 LIB += rt m
+ifeq ($(UNAME_S),FreeBSD)
+LIB += execinfo
+endif
 
 # when $ make FORKER_PAPI=y
 ifeq ($(strip $(FORKER_PAPI)),y)

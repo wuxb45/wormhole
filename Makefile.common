@@ -6,6 +6,7 @@ MAKEFLAGS += -r -R
 HDR = $(addsuffix .h,$(MODULES) $(HEADERS))
 SRC = $(addsuffix .c,$(MODULES) $(SOURCES))
 ASM = $(addsuffix .S,$(ASSMBLY))
+OBJ = $(addsuffix .o,$(MODULES) $(SOURCES) $(ASSEMBLY))
 DEP = Makefile $(HDR) $(EXTERNDEP) $(EXTERNSRC)
 BIN = $(addsuffix .out,$(TARGETS))
 DIS = $(addsuffix .dis,$(TARGETS))
@@ -79,7 +80,7 @@ NBI += memcpy memmove memcmp
 # minimal requirement on x86_64: -march=nehalem
 # minimal requirement on aarch64: -march=armv8-a+crc
 FLG += -march=$(ARCH) -mtune=$(TUNE)
-FLG += -pthread -Wall -Wextra -Wshadow
+FLG += -pthread -Wall -Wextra -Wshadow #-Weverything
 FLG += $(addprefix -fno-builtin-,$(NBI))
 FLG += $(OPT)
 
@@ -95,28 +96,40 @@ endif
 bin : $(BIN)
 dis : $(DIS) bin
 .DEFAULT_GOAL = bin
-
 .SECONDEXPANSION:
+
+ifeq ($(J),o)
+# DANGER. Don't use unless it works!
+# build from .o files but target-specific flags are missing in %.o : %.x
+%.out : %.o $(OBJ) $$(addsuffix .o,$$(SRC-$$@) $$(MOD-$$@) $$(ASM-$$@))
+	$(eval ALLFLG := $(FLG) $(FLG-$*) $(FLG-$*.o) $(FLG-$@) -rdynamic)
+	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
+	$(CCC) $(CSTD) $(EXTRA) $(ALLFLG) -o $@ $^ $(ALLLIB)
+#
+else # default: all-in-one command
 %.out : %.c $(SRC) $(ASM) $(DEP) $$(DEP-$$@) $$(addsuffix .c,$$(SRC-$$@) $$(MOD-$$@)) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@)) $$(addsuffix .S,$$(ASM-$$@))
 	$(eval ALLSRC := $(SRC) $(addsuffix .c,$(SRC-$@) $(MOD-$@)) $(ASM) $(addsuffix .S,$(ASM-$@)))
 	$(eval ALLFLG := $(FLG) $(FLG-$@) -rdynamic)
 	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
 	$(CCC) $(CSTD) $(EXTRA) $(ALLFLG) -o $@ $< $(ALLSRC) $(ALLLIB)
+#
+endif
+
 
 %.dis : %.out
 	objdump -SlwTC $< 1> $@ 2>/dev/null
 
 %.o : %.cc $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
-	$(eval STEM := $(patsubst %.o,%,$@))
-	$(XCC) $(XSTD) $(EXTRA) $(FLG) $(FLG-$(STEM)) -o $@ -c $<
+	$(XCC) $(XSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
 
 %.o : %.c $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
-	$(eval STEM := $(patsubst %.o,%,$@))
-	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$(STEM)) -o $@ -c $<
+	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
+
+%.o : %.S $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
+	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
 
 %.s : %.c $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
-	$(eval STEM := $(patsubst %.o,%,$@))
-	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$(STEM)) -S -o $@ -c $<
+	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) -S -o $@ -c $<
 
 clean :
 	rm -rf *.out *.dis *.o *.gcda *.gcno *.gcov
@@ -134,7 +147,9 @@ endif
 
 check :
 	cppcheck -I /usr/include -I /usr/local/include $(addprefix -I ,$(CCINC)) \
-    -q -D__x86_64__=1 -U__cplusplus --std=c11 --language=c --platform=unix64 --enable=all .
+    -q -D__x86_64__=1 -DNDEBUG -U__cplusplus \
+    --std=c11 --language=c --platform=unix64 \
+    --enable=warning,style,performance,portability,information .
 
 tags :
 	ctags -R . /usr/include /usr/local/include $(CCINC)
