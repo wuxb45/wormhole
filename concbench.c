@@ -125,10 +125,10 @@ main(int argc, char ** argv)
   printf("load x4 %.2lf mops\n", ((double)nkeys) * 1e3 / ((double)dtl));
 
   const u64 nth = strtoull(argv[3], NULL, 10);
-  printf("probe with %lu threads. each round takes 10 seconds\n", nth);
+  printf("probe with %lu threads. each round takes 3 seconds\n", nth);
   for (u64 i = 0; i < 3; i++) {
     __tot = 0;
-    __endtime = time_nsec() + 3e9; // 10 sec
+    __endtime = time_nsec() + 3e9; // 3 sec
     const u64 dt = thread_fork_join(nth, (void *)kv_probe_worker, false, (void *)wh);
     const double mops = ((double)__tot) * 1e3 / ((double)dt);
     printf("probe x%lu %.2lf mops\n", nth, mops);

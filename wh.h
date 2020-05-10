@@ -8,6 +8,14 @@
 extern "C" {
 #endif
 
+// crc32c {{{
+  extern u32
+kv_crc32c(const void * const ptr, u32 len);
+
+  extern u64
+kv_crc32c_extend(const u32 crc32c);
+// }}}
+
 // kv {{{
 /*
  * Some internal union names can be ignored:
@@ -212,6 +220,9 @@ kref_refill_hash32(struct kref * const kref, const u8 * const ptr, const u32 len
 kref_kv_match(const struct kref * const kref, const struct kv * const k);
 
   extern int
+kref_compare(const struct kref * const kref1, const struct kref * const kref2);
+
+  extern int
 kref_kv_compare(const struct kref * const kref, const struct kv * const k);
 
   extern int
@@ -229,6 +240,9 @@ kref_null(void);
 // kvmap_api {{{
 typedef void (* kv_inp_func)(struct kv * const curr, void * const priv);
 
+// merge() will do SET if the kv_merge_func() returns a kv; do nothing if NULL (no deletion)
+typedef struct kv * (* kv_merge_func)(struct kv * const key0, void * const priv);
+
 struct kvmap_api {
   // feature bits
   bool        hashkey; // true: caller needs to provide correct hash in kv/kref
@@ -238,16 +252,21 @@ struct kvmap_api {
   bool        reserved[4];
 
   //// thread-safe basic functions:
-  // set: return true on success; false on error
-  bool        (* set)     (void * const map, struct kv * const kv);
+  // set (aka upsert): return true on success; false on error
+  bool        (* set)     (void * const ref, struct kv * const kv);
   // get: return "out" or malloc-ed kv on found
-  struct kv * (* get)     (void * const map, const struct kref * const key, struct kv * const out);
+  struct kv * (* get)     (void * const ref, const struct kref * const key, struct kv * const out);
   // probe: return true on found, false on not found
-  bool        (* probe)   (void * const map, const struct kref * const key);
+  bool        (* probe)   (void * const ref, const struct kref * const key);
   // del: return true on something deleted, false on not found
-  bool        (* del)     (void * const map, const struct kref * const key);
+  bool        (* del)     (void * const ref, const struct kref * const key);
   // inp: inplace operation if key exists; otherwise return false
-  bool        (* inp) (void * const map, const struct kref * const key, kv_inp_func uf, void * const priv);
+  bool        (* inp)     (void * const ref, const struct kref * const key, kv_inp_func uf, void * const priv);
+  // merge: set+callback on old/new keys; another name: read-modify-write
+  // return true if successfull; return false on error
+  bool        (* merge)   (void * const ref, const struct kref * const key, kv_merge_func uf, void * const priv);
+  // delete-range: delete all keys from start (inclusive) to end (exclusive)
+  u64         (* delr)    (void * const ref, const struct kref * const start, const struct kref * const end);
 
   // create refs for maps if required
   // if there are ref/unref functions, ref-ptr should be used as map for get/probe/set/del
@@ -256,7 +275,7 @@ struct kvmap_api {
   // return the original map
   void *      (* unref)   (void * ref);
 
-  // unsafe functions:
+  // UNSAFE functions:
   // turn locking on/off; returns if locking is on/off
   bool        (* locking) (void * map, const bool locking);
   // empty the map
@@ -316,6 +335,14 @@ kvmap_kv_del(const struct kvmap_api * const api, void * const map,
 kvmap_kv_inp(const struct kvmap_api * const api, void * const map,
     const struct kv * const key, kv_inp_func uf, void * const priv);
 
+  extern bool
+kvmap_kv_merge(const struct kvmap_api * const api, void * const ref,
+    const struct kv * const key, kv_merge_func uf, void * const priv);
+
+  extern u64
+kvmap_kv_delr(const struct kvmap_api * const api, void * const ref,
+    const struct kv * const start, const struct kv * const end);
+
   extern void
 kvmap_kv_iter_seek(const struct kvmap_api * const api, void * const iter,
     const struct kv * const key);
@@ -365,11 +392,19 @@ wormhole_probe(struct wormref * const ref, const struct kref * const key);
 wormhole_set(struct wormref * const ref, struct kv * const kv);
 
   extern bool
+wormhole_merge(struct wormref * const ref, const struct kref * const kref,
+    kv_merge_func uf, void * const priv);
+
+  extern bool
 wormhole_inp(struct wormref * const ref, const struct kref * const key,
     kv_inp_func uf, void * const priv);
 
   extern bool
 wormhole_del(struct wormref * const ref, const struct kref * const key);
+
+  extern u64
+wormhole_delr(struct wormref * const ref, const struct kref * const start,
+    const struct kref * const end);
 
   extern struct wormhole_iter *
 wormhole_iter_create(struct wormref * const ref);
@@ -422,11 +457,19 @@ whunsafe_probe(struct wormhole * const map, const struct kref * const key);
 whunsafe_set(struct wormhole * const map, struct kv * const kv);
 
   extern bool
+whunsafe_merge(struct wormhole * const map, const struct kref * const kref,
+    kv_merge_func uf, void * const priv);
+
+  extern bool
 whunsafe_inp(struct wormhole * const map, const struct kref * const key,
     kv_inp_func uf, void * const priv);
 
   extern bool
 whunsafe_del(struct wormhole * const map, const struct kref * const key);
+
+  extern u64
+whunsafe_delr(struct wormhole * const map, const struct kref * const start,
+    const struct kref * const end);
 
   extern struct wormhole_iter *
 whunsafe_iter_create(struct wormhole * const map);
@@ -459,6 +502,19 @@ wormhole_fprint(struct wormhole * const map, FILE * const out);
 // kvmap_api {{{
 extern const struct kvmap_api kvmap_api_wormhole;
 extern const struct kvmap_api kvmap_api_whunsafe;
+
+struct kvmap_api_reg {
+  int nargs; // number of arguments after name
+  const char * name;
+  const char * args_msg; // see ...helper_message
+  // multiple apis may share one create function
+  // arguments: name (e.g., "rdb"), mm (usually NULL), the remaining args
+  void * (*create)(const char *, const struct kvmap_mm *, char **);
+  const struct kvmap_api * api;
+};
+
+  extern void
+kvmap_api_register(const struct kvmap_api_reg * const reg);
 
   extern void
 kvmap_api_helper_message(void);

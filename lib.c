@@ -9,16 +9,18 @@
 #include "lib.h"
 #include "ctypes.h"
 #include <assert.h>
-#include <byteswap.h>
 #include <execinfo.h>
 #include <math.h>
 #include <netdb.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/socket.h>
-#include <sys/sysinfo.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#if defined(__FreeBSD__)
+#include <pthread_np.h>
+#endif
 // }}} headers
 
 // math {{{
@@ -115,6 +117,8 @@ cpu_pause(void)
 {
 #if defined(__x86_64__)
   _mm_pause();
+#elif defined(__aarch64__)
+  __yield();
 #endif
 }
 
@@ -243,13 +247,13 @@ debug_wait_gdb(void)
 
   char timestamp[64];
   time_stamp(timestamp, 64);
-  char threadname[64];
-  pthread_getname_np(pthread_self(), threadname, 64);
+  char threadname[64] = {};
+  thread_get_name(pthread_self(), threadname, 64);
   char hostname[64];
   gethostname(hostname, 64);
 
   const char * const pattern = "[Waiting GDB] %s %s @ %s\n"
-    "    Attach me:   " ANSI_ESCAPE(31) "sudo -Hi gdb -p %d" ANSI_ESCAPE(0) "\n";
+    "    Attach me:   " TERMCLR(31) "sudo -Hi gdb -p %d" TERMCLR(0) "\n";
   fprintf(stderr, pattern, timestamp, threadname, hostname, getpid());
   fflush(stderr);
   // to continue: gdb> set var v = 0
@@ -294,10 +298,8 @@ debug_init(void)
   if (sigaltstack(&ss, NULL))
     fprintf(stderr, "sigaltstack failed\n");
 
-  struct sigaction sa = {};
-  sa.sa_sigaction = wait_gdb_handler;
+  struct sigaction sa = {.sa_sigaction = wait_gdb_handler, .sa_flags = SA_SIGINFO | SA_ONSTACK};
   sigemptyset(&(sa.sa_mask));
-  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
   const int fatals[] = {SIGSEGV, SIGFPE, SIGILL, SIGBUS, 0};
   for (int i = 0; fatals[i]; i++) {
     if (sigaction(fatals[i], &sa, NULL) == -1) {
@@ -336,6 +338,7 @@ debug_dump_maps(FILE * const out)
 
 static pid_t perf_pid = 0;
 
+#if defined(__linux__)
 __attribute__((constructor))
   static void
 debug_perf_init(void)
@@ -360,6 +363,7 @@ debug_perf_init(void)
     perf_pid = ppid;
   }
 }
+#endif
 
   bool
 debug_perf_switch(void)
@@ -466,14 +470,23 @@ pages_do_alloc(const size_t size, const int flags)
 
   return p;
 }
-#endif
+
+#if defined(__linux__)
+#define PAGES_FLAGS_1G ((MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)))
+#define PAGES_FLAGS_2M ((MAP_HUGETLB | (21 << MAP_HUGE_SHIFT)))
+#else
+#define PAGES_FLAGS_1G ((0))
+#define PAGES_FLAGS_2M ((0))
+#endif // __linux__
+
+#endif // HEAPCHECKING
 
   inline void *
 pages_alloc_1gb(const size_t nr_1gb)
 {
   const u64 sz = nr_1gb << 30;
 #ifndef HEAPCHECKING
-  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (30 << MAP_HUGE_SHIFT));
+  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | PAGES_FLAGS_1G);
 #else
   void * const p = xalloc(1lu << 21, sz); // Warning: valgrind fails with 30
   if (p)
@@ -487,7 +500,7 @@ pages_alloc_2mb(const size_t nr_2mb)
 {
   const u64 sz = nr_2mb << 21;
 #ifndef HEAPCHECKING
-  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | (21 << MAP_HUGE_SHIFT));
+  return pages_do_alloc(sz, MAP_PRIVATE | MAP_ANONYMOUS | PAGES_FLAGS_2M);
 #else
   void * const p = xalloc(1lu << 21, sz);
   if (p)
@@ -549,7 +562,9 @@ pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
 
 // process/thread {{{
 static u32 process_ncpu;
-static size_t cpu_set_size;
+#if defined(__FreeBSD__)
+typedef cpuset_t cpu_set_t;
+#endif
 
 __attribute__((constructor))
   static void
@@ -557,46 +572,82 @@ process_init(void)
 {
   // Linux's default is 1024 cpus
   process_ncpu = (u32)sysconf(_SC_NPROCESSORS_CONF);
-  cpu_set_size = CPU_ALLOC_SIZE(process_ncpu);
-  if (cpu_set_size > sizeof(cpu_set_t))
+  if (process_ncpu > CPU_SETSIZE) {
     fprintf(stderr, "%s: can use only %zu cores\n",
-        __func__, sizeof(cpu_set_t) * 8);
+        __func__, (size_t)CPU_SETSIZE);
+    process_ncpu = CPU_SETSIZE;
+  }
 }
 
-  u64
+  static inline int
+thread_getaffinity(cpu_set_t * const cpuset)
+{
+#if defined(__linux__)
+  return sched_getaffinity(0, sizeof(*cpuset), cpuset);
+#elif defined(__FreeBSD__)
+  return cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(*cpuset), cpuset);
+#endif
+}
+
+  static inline int
+thread_setaffinity(const cpu_set_t * const cpuset)
+{
+#if defined(__linux__)
+  return sched_setaffinity(0, sizeof(*cpuset), cpuset);
+#elif defined(__FreeBSD__)
+  return cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(*cpuset), cpuset);
+#endif
+}
+
+  void
+thread_get_name(const pthread_t pt, char * const name, const size_t len)
+{
+#if defined(__linux__)
+  pthread_getname_np(pt, name, len);
+#elif defined(__FreeBSD__)
+  pthread_get_name_np(pt, name, len);
+#endif
+}
+
+  void
+thread_set_name(const pthread_t pt, const char * const name)
+{
+#if defined(__linux__)
+  pthread_setname_np(pt, name);
+#elif defined(__FreeBSD__)
+  pthread_set_name_np(pt, name);
+#endif
+}
+
+// kB
+  long
 process_get_rss(void)
 {
-  u64 size, rss = 0;
-  FILE * const fp = fopen("/proc/self/statm", "r");
-  if (fp == NULL)
-    return 0;
-  const int r = fscanf(fp, "%lu %lu", &size, &rss);
-  fclose(fp);
-  if (r != 2)
-    return 0;
-  return rss * (u64)sysconf(_SC_PAGESIZE);
+  struct rusage rs;
+  getrusage(RUSAGE_SELF, &rs);
+  return rs.ru_maxrss;
 }
 
   u32
-process_affinity_core_count(void)
+process_affinity_count(void)
 {
   cpu_set_t set;
-  if (sched_getaffinity(0, cpu_set_size, &set) != 0)
+  if (thread_getaffinity(&set) != 0)
     return process_ncpu;
 
-  const u32 nr = (u32)CPU_COUNT_S(cpu_set_size, &set);
+  const u32 nr = (u32)CPU_COUNT(&set);
   return nr ? nr : process_ncpu;
 }
 
   u32
-process_affinity_core_list(const u32 max, u32 * const cores)
+process_affinity_list(const u32 max, u32 * const cores)
 {
   memset(cores, 0, max * sizeof(cores[0]));
   cpu_set_t set;
-  if (sched_getaffinity(0, cpu_set_size, &set) != 0)
+  if (thread_getaffinity(&set) != 0)
     return 0;
 
-  const u32 nr_affinity = (u32)CPU_COUNT_S(cpu_set_size, &set);
+  const u32 nr_affinity = (u32)CPU_COUNT(&set);
   const u32 nr = nr_affinity < max ? nr_affinity : max;
   u32 j = 0;
   for (u32 i = 0; i < process_ncpu; i++) {
@@ -612,20 +663,20 @@ process_affinity_core_list(const u32 max, u32 * const cores)
   u64
 process_cpu_time_usec(void)
 {
-  struct rusage r;
-  getrusage(RUSAGE_SELF, &r);
-  const u64 usr = (((u64)r.ru_utime.tv_sec) * 1000000lu) + ((u64)r.ru_utime.tv_usec);
-  const u64 sys = (((u64)r.ru_stime.tv_sec) * 1000000lu) + ((u64)r.ru_stime.tv_usec);
+  struct rusage rs;
+  getrusage(RUSAGE_SELF, &rs);
+  const u64 usr = (((u64)rs.ru_utime.tv_sec) * 1000000lu) + ((u64)rs.ru_utime.tv_usec);
+  const u64 sys = (((u64)rs.ru_stime.tv_sec) * 1000000lu) + ((u64)rs.ru_stime.tv_usec);
   return usr + sys;
 }
 
   void
-thread_set_affinity(const u32 cpu)
+thread_pin(const u32 cpu)
 {
   cpu_set_t set;
-  CPU_ZERO_S(cpu_set_size, &set);
+  CPU_ZERO(&set);
   CPU_SET(cpu % process_ncpu, &set);
-  sched_setaffinity(0, cpu_set_size, &set);
+  thread_setaffinity(&set);
 }
 
 struct fork_join_info {
@@ -644,7 +695,7 @@ struct fork_join_info {
 
 // DON'T CHANGE!
 #define FORK_JOIN_RANK_BITS ((16)) // 16
-#define FORK_JOIN_MAX ((1 << FORK_JOIN_RANK_BITS))
+#define FORK_JOIN_MAX ((1u << FORK_JOIN_RANK_BITS))
 #define FORK_JOIN_FJI_BITS ((64 - FORK_JOIN_RANK_BITS)) // 48
 struct fork_join_priv {
   union {
@@ -683,7 +734,7 @@ thread_do_fork_join_worker(void * const ptr)
   pthread_t tids[FORK_JOIN_RANK_BITS];
   if (nchild) {
     cpu_set_t set;
-    CPU_ZERO_S(cpu_set_size, &set);
+    CPU_ZERO(&set);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
@@ -694,7 +745,7 @@ thread_do_fork_join_worker(void * const ptr)
         continue; // should not break
       const u32 core = fji->cores[cr % fji->ncores];
       CPU_SET(core, &set);
-      pthread_attr_setaffinity_np(&attr, cpu_set_size, &set);
+      pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
       fjp.rank = cr;
       const int r = pthread_create(&tids[i], &attr, thread_do_fork_join_worker, fjp.ptr);
       if (r) { // fork failed
@@ -712,7 +763,7 @@ thread_do_fork_join_worker(void * const ptr)
 
   char thname[16];
   sprintf(thname, "fj_%u", rank);
-  pthread_setname_np(pthread_self(), thname);
+  thread_set_name(pthread_self(), thname);
 
   void * const ret = fji->func(fji->args ? fji->argn[rank] : fji->arg1);
 
@@ -741,7 +792,7 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
   }
 
   u32 cores[process_ncpu];
-  u32 ncores = process_affinity_core_list(process_ncpu, cores);
+  u32 ncores = process_affinity_list(process_ncpu, cores);
   if (ncores == 0) { // force to use all cores
     ncores = process_ncpu;
     for (u32 i = 0; i < process_ncpu; i++)
@@ -763,20 +814,20 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
 
   // save current affinity
   cpu_set_t set0;
-  sched_getaffinity(0, cpu_set_size, &set0);
+  thread_getaffinity(&set0);
 
   // master thread shares thread0's core
   cpu_set_t set;
-  CPU_ZERO_S(cpu_set_size, &set);
+  CPU_ZERO(&set);
   CPU_SET(fji.cores[0], &set);
-  sched_setaffinity(0, cpu_set_size, &set);
+  thread_setaffinity(&set);
 
   const u64 t0 = time_nsec();
   thread_do_fork_join_worker(fjp.ptr);
   const u64 dt = time_diff_nsec(t0);
 
   // restore original affinity
-  sched_setaffinity(0, cpu_set_size, &set0);
+  thread_setaffinity(&set0);
   if (fji.ferr || fji.jerr)
     fprintf(stderr, "%s errors: fork %lu join %lu\n", __func__, fji.ferr, fji.jerr);
   return dt;
@@ -791,18 +842,12 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
   cpu_set_t set;
 
-  CPU_ZERO_S(cpu_set_size, &set);
+  CPU_ZERO(&set);
   CPU_SET(cpu_id, &set);
-  pthread_attr_setaffinity_np(&attr, cpu_set_size, &set);
+  pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
   const int r = pthread_create(thread, &attr, start_routine, arg);
   pthread_attr_destroy(&attr);
   return r;
-}
-
-  inline u32
-thread_get_core(void)
-{
-  return (u32)sched_getcpu();
 }
 // }}} process/thread
 
@@ -821,15 +866,21 @@ spinlock_init(spinlock * const lock)
   inline void
 spinlock_lock(spinlock * const lock)
 {
+#if defined(CORR)
+#pragma nounroll
+  while (!spinlock_trylock(lock))
+    corr_yield();
+#else
   pthread_spinlock_t * const p = (typeof(p))lock;
-  pthread_spin_lock(p);
+  pthread_spin_lock(p); // return value ignored
+#endif
 }
 
   inline bool
 spinlock_trylock(spinlock * const lock)
 {
   pthread_spinlock_t * const p = (typeof(p))lock;
-  return 0 == pthread_spin_trylock(p);
+  return !pthread_spin_trylock(p);
 }
 
   inline bool
@@ -838,7 +889,7 @@ spinlock_trylock_nr(spinlock * const lock, u16 nr)
   pthread_spinlock_t * const p = (typeof(p))lock;
 #pragma nounroll
   do {
-    if (0 == pthread_spin_trylock(p))
+    if (!pthread_spin_trylock(p))
       return true;
     cpu_pause();
   } while (nr--);
@@ -849,7 +900,7 @@ spinlock_trylock_nr(spinlock * const lock, u16 nr)
 spinlock_unlock(spinlock * const lock)
 {
   pthread_spinlock_t * const p = (typeof(p))lock;
-  pthread_spin_unlock(p);
+  pthread_spin_unlock(p); // return value ignored
 }
 // }}} spinlock
 
@@ -865,45 +916,28 @@ mutex_init(mutex * const lock)
   inline void
 mutex_lock(mutex * const lock)
 {
-  pthread_mutex_t * const p = (typeof(p))lock;
+#if defined(CORR)
 #pragma nounroll
-  do {
-    const int r = pthread_mutex_lock(p);
-    if (r == 0)
-      return;
-    else if (r != EAGAIN)
-      debug_die();
-  } while (true);
+  while (!mutex_trylock(lock))
+    corr_yield();
+#else
+  pthread_mutex_t * const p = (typeof(p))lock;
+  pthread_mutex_lock(p); // return value ignored
+#endif
 }
 
   inline bool
 mutex_trylock(mutex * const lock)
 {
   pthread_mutex_t * const p = (typeof(p))lock;
-#pragma nounroll
-  do {
-    const int r = pthread_mutex_trylock(p);
-    if (r == 0)
-      return true;
-    else if (r == EBUSY)
-      return false;
-    else if (r != EAGAIN)
-      debug_die();
-  } while (true);
+  return !pthread_mutex_trylock(p); // return value ignored
 }
 
   inline void
 mutex_unlock(mutex * const lock)
 {
   pthread_mutex_t * const p = (typeof(p))lock;
-#pragma nounroll
-  do {
-    const int r = pthread_mutex_unlock(p);
-    if (r == 0)
-      return;
-    else if ((r != EAGAIN))
-      debug_die();
-  } while (true);
+  pthread_mutex_unlock(p); // return value ignored
 }
 // }}} pthread mutex
 
@@ -964,7 +998,11 @@ rwlock_lock_read(rwlock * const lock)
       return;
 #pragma nounroll
     do {
+#if defined(CORR)
+      corr_yield();
+#else
       cpu_pause();
+#endif
     } while (atomic_load(pvar) >> RWLOCK_WSHIFT);
   } while (true);
 }
@@ -1007,7 +1045,11 @@ rwlock_lock_write(rwlock * const lock)
       return;
 #pragma nounroll
     do {
+#if defined(CORR)
+      corr_yield();
+#else
       cpu_pause();
+#endif
     } while (atomic_load(pvar));
   } while (true);
 }
@@ -1035,9 +1077,8 @@ rwlock_write_to_read(rwlock * const lock)
 
 // coroutine {{{
 
+// asm {{{
 #if defined(__x86_64__)
-
-// co {{{
 // number pushes in co_switch_stack
 #define CO_CONTEXT_SIZE ((6))
 
@@ -1057,6 +1098,50 @@ asm (
     "retq;"
     );
 
+#elif defined(__aarch64__)
+// number pushes in co_switch_stack
+#define CO_CONTEXT_SIZE ((20))
+asm (
+    ".global co_switch_stack;"
+    ".type co_switch_stack, @function;"
+    ".align 16;"
+    "co_switch_stack:"
+    "sub  x8, sp, 160;"
+    "str  x8, [x0];"
+    "stp x30, x19, [x8];      ldp x30, x19, [x1];"
+    "stp x20, x21, [x8, 16];  ldp x20, x21, [x1, 16];"
+    "stp x22, x23, [x8, 32];  ldp x22, x23, [x1, 32];"
+    "stp x24, x25, [x8, 48];  ldp x24, x25, [x1, 48];"
+    "stp x26, x27, [x8, 64];  ldp x26, x27, [x1, 64];"
+    "stp x28, x29, [x8, 80];  ldp x28, x29, [x1, 80];"
+    "stp  d8,  d9, [x8, 96];  ldp  d8,  d9, [x1, 96];"
+    "stp d10, d11, [x8, 112]; ldp d10, d11, [x1, 112];"
+    "stp d12, d13, [x8, 128]; ldp d12, d13, [x1, 128];"
+    "stp d14, d15, [x8, 144]; ldp d14, d15, [x1, 144];"
+    "add  sp, x1, 160;"
+    "mov  x0, x2;"
+    "br  x30;"
+    );
+
+extern void co_entry_aarch64(void);
+asm (
+    ".global co_entry_aarch64;"
+    ".type co_entry_aarch64, @function;"
+    ".align 16;"
+    "co_entry_aarch64:"
+    "ldr x8, [sp, 0];"
+    "blr x8;"
+    "ldr x8, [sp, 8];"
+    "blr x8;"
+    "ldr x8, [sp, 16];"
+    "blr x8;"
+    );
+#else
+#error x86_64 or AArch64 required.
+#endif // co_switch_stack x86_64 and aarch64
+// }}} asm
+
+// co {{{
 struct co {
   u64 rsp;
   void * priv;
@@ -1069,8 +1154,9 @@ static __thread struct co * volatile co_curr = NULL; // NULL in host
 // the stack sits under the struct co
   static void
 co_init(struct co * const co, void * func, void * priv, u64 * const host,
-    const u64 stacksize, void * func_exit)
+    const u64 stksz, void * func_exit)
 {
+  debug_assert((stksz & 0x3f) == 0); // a multiple of 64 bytes
   u64 * rsp = ((u64 *)co) - 4;
   rsp[0] = (u64)func;
   rsp[1] = (u64)func_exit;
@@ -1079,10 +1165,14 @@ co_init(struct co * const co, void * func, void * priv, u64 * const host,
 
   rsp -= CO_CONTEXT_SIZE;
 
+#if defined(__aarch64__)
+  rsp[0] = (u64)co_entry_aarch64;
+#endif
+
   co->rsp = (u64)rsp;
   co->priv = priv;
   co->host = host;
-  co->stksz = stacksize;
+  co->stksz = stksz;
 }
 
   static void
@@ -1094,17 +1184,18 @@ co_exit0(void)
   struct co *
 co_create(const u64 stacksize, void * func, void * priv, u64 * const host)
 {
-  const size_t alloc_size = stacksize + sizeof(struct co);
+  const u64 stksz = bits_round_up(stacksize, 6);
+  const size_t alloc_size = stksz + sizeof(struct co);
   u8 * const mem = yalloc(alloc_size);
   if (mem == NULL)
     return NULL;
 
-#if COSTACKCHECK
-  memset(mem, 0x5c, stacksize);
+#ifdef COSTACKCHECK
+  memset(mem, 0x5c, stksz);
 #endif
 
-  struct co * const co = (typeof(co))(mem + stacksize);
-  co_init(co, func, priv, host, stacksize, co_exit0);
+  struct co * const co = (typeof(co))(mem + stksz);
+  co_init(co, func, priv, host, stksz, co_exit0);
   return co;
 }
 
@@ -1202,32 +1293,28 @@ co_destroy(struct co * const co)
 // }}} co
 
 // corr {{{
-
 struct corr {
   struct co co;
   struct corr * next;
   struct corr * prev;
 };
 
-//static __thread struct corr * corr_head = NULL; // NULL in host
-
-// co-routine
-
 // initial and link guest to the run-queue
   struct corr *
 corr_create(const u64 stacksize, void * func, void * priv, u64 * const host)
 {
-  const size_t alloc_size = stacksize + sizeof(struct corr);
+  const u64 stksz = bits_round_up(stacksize, 6);
+  const size_t alloc_size = stksz + sizeof(struct corr);
   u8 * const mem = yalloc(alloc_size);
   if (mem == NULL)
     return NULL;
 
-#if COSTACKCHECK
-  memset(mem, 0x5c, stacksize);
+#ifdef COSTACKCHECK
+  memset(mem, 0x5c, stksz);
 #endif
 
-  struct corr * const co = (typeof(co))(mem + stacksize);
-  co_init(&(co->co), func, priv, host, stacksize, corr_exit);
+  struct corr * const co = (typeof(co))(mem + stksz);
+  co_init(&(co->co), func, priv, host, stksz, corr_exit);
   co->next = co;
   co->prev = co;
   return co;
@@ -1236,17 +1323,18 @@ corr_create(const u64 stacksize, void * func, void * priv, u64 * const host)
   struct corr *
 corr_link(const u64 stacksize, void * func, void * priv, struct corr * const prev)
 {
-  const size_t alloc_size = stacksize + sizeof(struct corr);
+  const u64 stksz = bits_round_up(stacksize, 6);
+  const size_t alloc_size = stksz + sizeof(struct corr);
   u8 * const mem = yalloc(alloc_size);
   if (mem == NULL)
     return NULL;
 
-#if COSTACKCHECK
-  memset(mem, 0x5c, stacksize);
+#ifdef COSTACKCHECK
+  memset(mem, 0x5c, stksz);
 #endif
 
-  struct corr * const co = (typeof(co))(mem + stacksize);
-  co_init(&(co->co), func, priv, prev->co.host, stacksize, corr_exit);
+  struct corr * const co = (typeof(co))(mem + stksz);
+  co_init(&(co->co), func, priv, prev->co.host, stksz, corr_exit);
   co->next = prev->next;
   co->prev = prev;
   co->prev->next = co;
@@ -1282,7 +1370,6 @@ corr_enter(struct corr * const co)
 corr_yield(void)
 {
   struct corr * const curr = (typeof(curr))co_curr;
-  debug_assert(curr);
   if (curr && (curr->next != curr))
     (void)co_switch_to(&(curr->next->co), 0);
 }
@@ -1292,7 +1379,7 @@ __attribute__((noreturn))
 corr_exit(void)
 {
   debug_assert(co_curr);
-#if COSTACKCHECK
+#ifdef COSTACKCHECK
   u8 * ptr = ((u8 *)(co_curr)) - co_curr->stksz;
   while ((*ptr) == 0x5c)
     ptr++;
@@ -1323,15 +1410,13 @@ corr_destroy(struct corr * const co)
 }
 // }}} corr
 
-#endif //__x86_64__
-
 // }}} co
 
 // bits {{{
   inline u32
 bits_reverse_u32(const u32 v)
 {
-  const u32 v2 = bswap_32(v);
+  const u32 v2 = __builtin_bswap32(v);
   const u32 v3 = ((v2 & 0xf0f0f0f0u) >> 4) | ((v2 & 0x0f0f0f0fu) << 4);
   const u32 v4 = ((v3 & 0xccccccccu) >> 2) | ((v3 & 0x33333333u) << 2);
   const u32 v5 = ((v4 & 0xaaaaaaaau) >> 1) | ((v4 & 0x55555555u) << 1);
@@ -1341,7 +1426,7 @@ bits_reverse_u32(const u32 v)
   inline u64
 bits_reverse_u64(const u64 v)
 {
-  const u64 v2 = bswap_64(v);
+  const u64 v2 = __builtin_bswap64(v);
   const u64 v3 = ((v2 & 0xf0f0f0f0f0f0f0f0lu) >>  4) | ((v2 & 0x0f0f0f0f0f0f0f0flu) <<  4);
   const u64 v4 = ((v3 & 0xcccccccccccccccclu) >>  2) | ((v3 & 0x3333333333333333lu) <<  2);
   const u64 v5 = ((v4 & 0xaaaaaaaaaaaaaaaalu) >>  1) | ((v4 & 0x5555555555555555lu) <<  1);
@@ -1391,7 +1476,7 @@ bits_p2_up_u32(const u32 v)
 }
 
   inline u64
-bits_p2_down(const u64 v)
+bits_p2_down_u64(const u64 v)
 {
   return v ? (1lu << (63lu - (u64)__builtin_clzl(v))) : v;
 }
@@ -1406,6 +1491,18 @@ bits_round_up(const u64 v, const u8 power)
 bits_round_up_a(const u64 v, const u64 a)
 {
   return (v + a - 1) / a * a;
+}
+
+  inline u64
+bits_round_down(const u64 v, const u8 power)
+{
+  return v >> power << power;
+}
+
+  inline u64
+bits_round_down_a(const u64 v, const u64 a)
+{
+  return v / a * a;
 }
 
   inline u32
@@ -1620,18 +1717,72 @@ struct slab_object {
 };
 
 struct slab {
-  spinlock lock;
-  u64 obj_size;
-  struct slab_object * obj_head;
-  u64 blk_size; // size of each memory block
-  u64 nr_ready; // available objects buffered
-  u64 nr_alloc; // number of objects in use
-  u64 objs_per_slab; // number of objects in a slab
+  //struct slab_object * obj_head;
+  union {
+    au64 amagic; // hi 48: ptr, lo 16: seq
+    volatile u64 magic; // unsafe
+  };
+  u64 obj_size; // const: aligned size of each object
+  u64 blk_size; // const: size of each memory block
+  u64 objs_per_slab; // const: number of objects in a slab
+
   struct slab_object * blk_head; // list of all blocks
+  u64 nalloc; // UNSAFE!
+  u64 nready; // UNSAFE!
+  u64 padding;
+  // 2nd line
+  mutex lock;
 };
 
+  static void
+slab_push_safe(struct slab * const slab, struct slab_object * const obj_head,
+    struct slab_object * const obj_last)
+{
+  do {
+    u64 m0 = slab->magic;
+    obj_last->next = (void *)(m0 >> 16);
+    const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
+    if (atomic_compare_exchange_weak(&slab->amagic, &m0, m1))
+      return;
+  } while (true);
+}
+
+  static void
+slab_push_unsafe(struct slab * const slab, struct slab_object * const obj_head,
+    struct slab_object * const obj_last)
+{
+  const u64 m0 = slab->magic;
+  obj_last->next = (void *)(m0 >> 16);
+  slab->magic = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
+}
+
+  static void *
+slab_pop_safe(struct slab * const slab)
+{
+  do {
+    u64 m0 = slab->magic;
+    struct slab_object * const ret = (typeof(ret))(m0 >> 16);
+    if (ret == NULL)
+      return ret;
+    const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
+    if (atomic_compare_exchange_weak(&slab->amagic, &m0, m1))
+      return ret;
+  } while (true);
+}
+
+  static void *
+slab_pop_unsafe(struct slab * const slab)
+{
+  const u64 m0 = slab->magic;
+  struct slab_object * const ret = (typeof(ret))(m0 >> 16);
+  if (ret == NULL)
+    return ret;
+  slab->magic = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
+  return (void *)ret;
+}
+
   static bool
-slab_expand(struct slab * const slab)
+slab_expand(struct slab * const slab, const bool safe)
 {
   size_t blk_size;
   struct slab_object * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
@@ -1641,16 +1792,22 @@ slab_expand(struct slab * const slab)
   debug_assert(blk_size == slab->blk_size);
   blk->next = slab->blk_head;
   slab->blk_head = blk;
-  slab->nr_ready += slab->objs_per_slab;
 
   u8 * const base = ((u8 *)blk) + SLAB_OBJ0_OFFSET;
-  struct slab_object * iter = slab->obj_head;
-  for (u64 i = slab->objs_per_slab; i; i--) {
-    struct slab_object * const obj = (typeof(obj))(base + ((i - 1) * slab->obj_size));
-    obj->next = iter;
-    iter = obj;
+  struct slab_object * iter = (typeof(iter))base; // [0]
+  for (u64 i = 1; i < slab->objs_per_slab; i++) {
+    struct slab_object * const next = (typeof(next))(base + (i * slab->obj_size));
+    iter->next = next;
+    iter = next;
   }
-  slab->obj_head = iter;
+  // base points to the first block; iter points to the last block
+  if (safe) {
+    slab_push_safe(slab, (struct slab_object *)base, iter);
+  } else { // unsafe
+    slab_push_unsafe(slab, (struct slab_object *)base, iter);
+    slab->nready += slab->objs_per_slab;
+  }
+
   return true;
 }
 
@@ -1662,25 +1819,27 @@ slab_create(const u64 obj_size, const u64 blk_size)
   if ((obj_size % 8lu) || (blk_size < 4096lu) || (blk_size & (blk_size - 1)))
     return NULL;
 
-  struct slab * const slab = malloc(sizeof(*slab));
+  struct slab * const slab = yalloc(sizeof(*slab));
   if (slab == NULL)
     return NULL;
-  spinlock_init(&(slab->lock));
+
+  slab->magic = 0;
   slab->obj_size = obj_size;
-  slab->obj_head = NULL;
   slab->blk_size = blk_size;
-  slab->nr_ready = 0;
-  slab->nr_alloc = 0;
   slab->objs_per_slab = (blk_size - SLAB_OBJ0_OFFSET) / obj_size;
   slab->blk_head = NULL;
+  slab->nalloc = 0;
+  slab->nready = 0;
+  mutex_init(&(slab->lock));
   return slab;
 }
 
+// unsafe
   bool
 slab_reserve_unsafe(struct slab * const slab, const u64 nr)
 {
-  while (slab->nr_ready < nr)
-    if (slab_expand(slab) == false)
+  while (slab->nready < nr)
+    if (!slab_expand(slab, false))
       return false;
   return true;
 }
@@ -1688,58 +1847,64 @@ slab_reserve_unsafe(struct slab * const slab, const u64 nr)
   void *
 slab_alloc_unsafe(struct slab * const slab)
 {
-  if (slab->obj_head == NULL) {
-    debug_assert(slab->nr_ready == 0);
-    if (slab_expand(slab) == false)
+  void * ret = slab_pop_unsafe(slab);
+  if (ret == NULL) {
+    if (!slab_expand(slab, false))
       return NULL;
+    ret = slab_pop_unsafe(slab);
   }
-  debug_assert(slab->obj_head);
-  struct slab_object * const obj = slab->obj_head;
-  slab->obj_head = obj->next;
-  slab->nr_ready--;
-  slab->nr_alloc++;
-  return (void *)obj;
+  debug_assert(ret);
+  slab->nready--;
+  slab->nalloc++;
+  return ret;
 }
 
   void *
-slab_alloc(struct slab * const slab)
+slab_alloc_safe(struct slab * const slab)
 {
-  spinlock_lock(&(slab->lock));
-  void * const ptr = slab_alloc_unsafe(slab);
-  spinlock_unlock(&(slab->lock));
-  return ptr;
+  void * ret = slab_pop_safe(slab);
+  if (ret)
+    return ret;
+
+  mutex_lock(&slab->lock);
+  do {
+    ret = slab_pop_safe(slab); // may already have new objs
+    if (ret)
+      break;
+    if (!slab_expand(slab, true))
+      break;
+  } while (true);
+  mutex_unlock(&slab->lock);
+  return ret;
 }
 
   void
 slab_free_unsafe(struct slab * const slab, void * const ptr)
 {
-  struct slab_object * const obj = (typeof(obj))ptr;
-  obj->next = slab->obj_head;
-  slab->obj_head = obj;
-  slab->nr_alloc--;
-  slab->nr_ready++;
+  debug_assert(ptr);
+  slab_push_unsafe(slab, ptr, ptr);
+  slab->nready++;
+  slab->nalloc--;
 }
 
   void
-slab_free(struct slab * const slab, void * const ptr)
+slab_free_safe(struct slab * const slab, void * const ptr)
 {
-  spinlock_lock(&(slab->lock));
-  slab_free_unsafe(slab, ptr);
-  spinlock_unlock(&(slab->lock));
+  slab_push_safe(slab, ptr, ptr);
 }
 
 // unsafe
-  u64
-slab_get_inuse(struct slab * const slab)
+  inline u64
+slab_get_nalloc(struct slab * const slab)
 {
-  return slab->nr_alloc;
+  return slab->nalloc;
 }
 
 // unsafe
-  u64
-slab_get_ready(struct slab * const slab)
+  inline u64
+slab_get_nready(struct slab * const slab)
 {
-  return slab->nr_ready;
+  return slab->nready;
 }
 
   void
@@ -1763,12 +1928,7 @@ compare_u16(const void * const p1, const void * const p2)
 {
   const u16 v1 = *((const u16 *)p1);
   const u16 v2 = *((const u16 *)p2);
-  if (v1 < v2)
-    return -1;
-  else if (v1 > v2)
-    return 1;
-  else
-    return 0;
+  return (int)((s16)(v1 - v2));
 }
 
   inline void
@@ -1800,12 +1960,7 @@ compare_u32(const void * const p1, const void * const p2)
 {
   const u32 v1 = *((const u32 *)p1);
   const u32 v2 = *((const u32 *)p2);
-  if (v1 < v2)
-    return -1;
-  else if (v1 > v2)
-    return 1;
-  else
-    return 0;
+  return (int)(v1 - v2);
 }
 
   inline void
@@ -1837,12 +1992,9 @@ compare_u64(const void * const p1, const void * const p2)
 {
   const u64 v1 = *((const u64 *)p1);
   const u64 v2 = *((const u64 *)p2);
-  if (v1 < v2)
-    return -1;
-  else if (v1 > v2)
-    return 1;
-  else
-    return 0;
+  const u64 diff = v1 - v2;
+  int ret = ((int)(diff >> 32)) | __builtin_popcountl(diff);
+  return ret;
 }
 
   inline void
@@ -2522,7 +2674,7 @@ gen_constant(struct rgen * const gi)
 }
 
   struct rgen *
-rgen_new_constant(const u64 c)
+rgen_new_const(const u64 c)
 {
   struct rgen * const gi = calloc(1, sizeof(*gi));
   gi->unit_u64 = c > UINT32_MAX;
@@ -2554,7 +2706,7 @@ rgen_new_expo(const double percentile, const double range)
 // }}} simple ones
 
 // linear {{{
-  struct rgen *
+  static struct rgen *
 rgen_new_linear(const u64 min, const u64 max, const s64 inc,
     const enum rgen_type type, rgen_next_func func)
 {
@@ -2732,7 +2884,7 @@ zeta_range_worker(void * const ptr)
   static double
 zeta_range(const u64 start, const u64 count, const double theta)
 {
-  const u32 ncores = process_affinity_core_count();
+  const u32 ncores = process_affinity_count();
   const u32 needed = (u32)((count >> 20) + 1); // 1m per core
   const u32 nth = needed < ncores ? needed : ncores;
   double sum = 0.0;
@@ -3026,7 +3178,7 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
   int ret = -1;
 
   if ((0 == strcmp(argv[1], "const")) && (argc >= 3)) {
-    gen = rgen_new_constant(a2u64(argv[2]));
+    gen = rgen_new_const(a2u64(argv[2]));
     ret = 3;
   } else if ((0 == strcmp(argv[1], "expo")) && (argc >= 4)) {
     gen = rgen_new_expo(atof(argv[2]), atof(argv[3]));
@@ -3084,7 +3236,7 @@ rgen_worker(void * const ptr)
     for (u64 i = 0; i < RGEN_ABUF_NR; i++) {
 #pragma nounroll
       while (atomic_load(&(info->avail[i])) == true) {
-        usleep(10);
+        usleep(100);
         if (atomic_load(&(info->running)) == false)
           return NULL;
       }
@@ -3250,7 +3402,7 @@ rgen_async_convert(struct rgen * const gen, const u32 cpu)
   if (thread_create_at(cpu, &(info->thread), rgen_worker, gen) == 0) {
     char thname[32];
     sprintf(thname, "rgen_async_%u", cpu);
-    pthread_setname_np(info->thread, thname);
+    thread_set_name(info->thread, thname);
     info->reader_id = 0;
     gen->async_worker = true;
     return true;
@@ -3425,10 +3577,10 @@ rcu_update(struct rcu * const rcu, void * const ptr)
 // qsbr {{{
 #define QSBR_STATES_NR ((22)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
 #define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1)
-#define QSBR_SHARDS_BITS ((3))
+#define QSBR_SHARDS_BITS ((5))
 #define QSBR_SHARDS_NR  (((1lu) << QSBR_SHARDS_BITS))
 #define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARDS_NR))
-#define QSBR_MHASH_SHIFT ((64 - QSBR_SHARDS_BITS))
+#define QSBR_MHASH_SHIFT ((32 - QSBR_SHARDS_BITS))
 
 // Quiescent-State-Based Reclamation RCU
 struct qsbr {
@@ -3455,7 +3607,7 @@ qsbr_create(void)
   static inline struct qshard *
 qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
 {
-  const u32 sid = mhash64((u64)ptr) >> QSBR_MHASH_SHIFT;
+  const u32 sid = crc32c_u64(0, (u64)ptr) >> QSBR_MHASH_SHIFT;
   debug_assert(sid < QSBR_SHARDS_NR);
   return &(q->shards[sid]);
 }
@@ -3490,12 +3642,14 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 #pragma nounroll
   while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
     (*ptr) = q->target;
-    cpu_pause();
+#if defined(CORR)
+    corr_yield();
+#endif
   }
 
   cpu_cfence();
   u64 bits = shard->bitmap;
-  debug_assert(bits < QSBR_BITMAP_FULL);
+  debug_assert(bits <= QSBR_BITMAP_FULL);
   while (bits) { // bits contains ones
     const u32 pos = (u32)__builtin_ctzl(bits);
     debug_assert(pos < QSBR_STATES_NR);
@@ -3509,7 +3663,6 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
     bits &= ~(1lu << pos);
   }
   debug_die();
-  spinlock_unlock(&(shard->lock));
 }
 
 // waiters needs external synchronization
@@ -3546,6 +3699,9 @@ qsbr_wait(struct qsbr * const q, const u64 target)
         nwait--;
       }
     }
+#if defined(CORR)
+    corr_yield();
+#endif
   }
   cpu_cfence();
   for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
@@ -3563,6 +3719,170 @@ qsbr_destroy(struct qsbr * const q)
 // }}} qsbr
 
 // }}} rcu
+
+// server {{{
+struct server {
+  int fd;
+  bool running;
+  pthread_t pt;
+  void *(*worker)(void *);
+  void * priv;
+  au64 ncli;
+};
+
+struct server_wi {
+  struct server * server;
+  int fd;
+};
+
+  static void *
+server_master(void * const ptr)
+{
+  const u32 nr_cores0 = process_affinity_count();
+  u32 * const cores = calloc(nr_cores0, sizeof(cores[0]));
+  const u32 nr_cores = process_affinity_list(nr_cores0, cores);
+  u32 seq = 0;
+
+  struct server * const server = (typeof(server))ptr;
+  while (server->running) {
+    struct pollfd pfd = {.fd = server->fd, .events = POLLIN};
+    const int rp = poll(&pfd, 1, 50);
+    if (rp == 0)
+      continue;
+    if (rp < 0)
+      break;
+    const int cli = accept(server->fd, NULL, NULL);
+    if (cli < 0) {
+      if (errno == EINTR)
+        continue; // retry
+      else
+        break; // fatal
+    }
+    pthread_t worker;
+    struct server_wi * const wi = malloc(sizeof(*wi));
+    wi->server = server;
+    wi->fd = cli;
+    const int r = thread_create_at(cores[seq], &worker, server->worker, wi);
+    if (r != 0) {
+      close(cli);
+      free(wi);
+      continue;
+    }
+    pthread_detach(worker);
+    server->ncli++;
+    seq++;
+    if (seq >= nr_cores)
+      seq = 0;
+  }
+  free(cores);
+  close(server->fd);
+  // wait for client threads
+  while (server->ncli)
+    usleep(100);
+  return NULL;
+}
+
+  struct server *
+server_create(const char * const host, const char * const port,
+    void * (* worker)(void *), void * const priv)
+{
+  struct addrinfo hint = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+  struct addrinfo * ai = NULL;
+  if (getaddrinfo(host, port, &hint, &ai))
+    return NULL;
+
+  int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (fd < 0)
+    goto fail_fd;
+  int reuse = 1; // true
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  if (bind(fd, ai->ai_addr, ai->ai_addrlen) || listen(fd, 64))
+    goto fail_listen;
+
+  struct server * const server = malloc(sizeof(*server));
+  if (!server)
+    goto fail_listen;
+  server->running = true;
+  server->fd = fd;
+  server->worker = worker;
+  server->priv = priv;
+  server->ncli = 0;
+  if (pthread_create(&(server->pt), NULL, server_master, server))
+    goto fail_th;
+
+  freeaddrinfo(ai);
+  return server;
+
+fail_th:
+  free(server);
+fail_listen:
+  close(fd);
+fail_fd:
+  freeaddrinfo(ai);
+  return NULL;
+}
+
+  void
+server_wait_destroy(struct server * const server)
+{
+  pthread_join(server->pt, NULL);
+  free(server);
+}
+
+  void
+server_kill_destroy(struct server * const server)
+{
+  server->running = false;
+  // the server thread will close fd
+  shutdown(server->fd, SHUT_RDWR);
+  pthread_join(server->pt, NULL);
+  free(server);
+}
+
+  int
+server_worker_fd(struct server_wi * const wi)
+{
+  return wi->fd;
+}
+
+  void *
+server_worker_priv(struct server_wi * const wi)
+{
+  return wi->server->priv;
+}
+
+__attribute__((noreturn))
+  void
+server_worker_exit(struct server_wi * const wi)
+{
+  wi->server->ncli--;
+  close(wi->fd);
+  free(wi);
+  pthread_exit(NULL);
+}
+
+  int
+client_connect(const char * const host, const char * const port)
+{
+  struct addrinfo hint = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+  struct addrinfo * ai = NULL;
+  if (getaddrinfo(host, port, &hint, &ai) != 0)
+    return -1;
+
+  const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (fd < 0) {
+    freeaddrinfo(ai);
+    return -1;
+  }
+  if (connect(fd, ai->ai_addr, ai->ai_addrlen)) {
+    freeaddrinfo(ai);
+    close(fd);
+    return -1;
+  }
+  freeaddrinfo(ai);
+  return fd;
+}
+// }}} server
 
 // forker {{{
 
@@ -3636,7 +3956,7 @@ forker_papi_report(struct forker_papi_info * const papi_info,
     vctr_merge(va, infov[i]->papi_vctr);
   }
   fprintf(out, "PAPI");
-  char name[1024];
+  char name[256];
   for (u64 i = 0; i < papi_info->nr; i++) {
     PAPI_event_code_to_name(papi_info->events[i], name);
     fprintf(out, " %s %lu", name, vctr_get(va, i));
@@ -3672,6 +3992,21 @@ forker_papi_report(struct forker_papi_info * const papi_info,
 #endif
 // }}} forker-papi
 
+  static void
+forker_pass_print(FILE * fout, char ** const pref,
+    int argc, char ** const argv, char * const msg)
+{
+  for (int i = 0; pref[i]; i++)
+    fprintf(fout, "%s ", pref[i]);
+  for (int i = 0; i < argc; i++)
+    fprintf(fout, "%s ", argv[i]);
+  if (isatty(fileno(fout)))
+    fprintf(fout, TERMCLR(34) "%s" TERMCLR(0), msg);
+  else
+    fprintf(fout, "%s", msg);
+  fflush(fout);
+}
+
   int
 forker_pass(const int argc, char ** const argv, char ** const pref,
     struct pass_info * const pi, const int nr_wargs0)
@@ -3685,7 +4020,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     return -1;
 
   const u32 c = a2u32(argv[1]);
-  const u32 cc = c ? c : process_affinity_core_count();
+  const u32 cc = c ? c : process_affinity_count();
   const u32 end_type = a2u32(argv[2]);
   const u64 magic = a2u64(argv[3]);
   const u32 repeat = a2u32(argv[4]);
@@ -3696,9 +4031,9 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
   if (argc < (PASS_NR_ARGS + nr_wargs))
     return -1;
 
-  const u32 nr_cores = process_affinity_core_count();
+  const u32 nr_cores = process_affinity_count();
   u32 cores[nr_cores];
-  process_affinity_core_list(nr_cores, cores);
+  process_affinity_list(nr_cores, cores);
   struct damp * const damp = damp_create(7, 0.004, 0.05);
   struct forker_papi_info * const papi_info = forker_papi_prepare();
   const char * const ascfg = getenv("FORKER_ASYNC_SHIFT");
@@ -3712,8 +4047,8 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     memset(&(info[i]), 0, sizeof(info[i]));
     infov[i] = &(info[i]);
     info[i].thread_func = pi->wf;
-    info[i].api = pi->api;
-    info[i].map = pi->map;
+    info[i].passdata[0] = pi->passdata[0];
+    info[i].passdata[1] = pi->passdata[1];
     info[i].gen = rgen_dup(pi->gen0);
     info[i].seed = (i + 73) * 117;
     info[i].end_type = end_type;
@@ -3760,15 +4095,14 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
         info[i].end_magic = end_time;
     }
 
-    struct rusage rs0, rs1;
-    getrusage(RUSAGE_SELF, &rs0);
+    const long rs0 = process_get_rss();
 
     debug_perf_switch();
     const u64 dt = thread_fork_join(cc, forker_thread_func, true, (void **)infov);
     debug_perf_switch();
 
-    getrusage(RUSAGE_SELF, &rs1);
-    fprintf(stderr, "rss_kb %+ld ", rs1.ru_maxrss - rs0.ru_maxrss);
+    const long rs1 = process_get_rss();
+    fprintf(stderr, "rss_kb %+ld ", rs1 - rs0);
 
     struct vctr * const va = vctr_create(pi->vctr_size);
     for (u64 i = 0; i < cc; i++)
@@ -3779,14 +4113,9 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     forker_papi_report(papi_info, infov, cc, stderr);
 
     // stderr messages
-    fprintf(stderr, " try %d %.2lf %.2lf ",
+    fprintf(stderr, " try %u %.2lf %.2lf ",
         r, ((double)dt1) * 1e-9, ((double)dt) * 1e-9);
-    for (int i = 0; pref[i]; i++)
-      fprintf(stderr, "%s ", pref[i]);
-    for (int i = 0; i < (PASS_NR_ARGS + nr_wargs); i++)
-      fprintf(stderr, "%s ", argv[i]);
-    fprintf(stderr, "%s", out);
-    fflush(stderr);
+    forker_pass_print(stderr, pref, PASS_NR_ARGS + nr_wargs, argv, out);
   }
 
   // clean up
@@ -3801,12 +4130,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
   }
 
   // done messages
-  for (int i = 0; pref[i]; i++)
-    fprintf(stdout, "%s ", pref[i]);
-  for (int i = 0; i < (PASS_NR_ARGS + nr_wargs); i++)
-    fprintf(stdout, "%s ", argv[i]);
-  fprintf(stdout, "%s", out);
-  fflush(stdout);
+  forker_pass_print(stdout, pref, PASS_NR_ARGS + nr_wargs, argv, out);
   return PASS_NR_ARGS + nr_wargs;
 #undef PASS_NR_ARGS
 #undef FORKER_GEN_OPT_SYNC
@@ -3862,12 +4186,12 @@ forker_passes_message(void)
 {
   fprintf(stderr, "%s Usage: {rgen ... {pass ...}}\n", __func__);
   rgen_helper_message();
-  fprintf(stderr, "%s Usage: pass <nth> " ANSI_ESCAPE(31) "<magic-type>" ANSI_ESCAPE(0), __func__);
-  fprintf(stderr, " <magic> <repeat> " ANSI_ESCAPE(34) "<rgen-opt>" ANSI_ESCAPE(0));
+  fprintf(stderr, "%s Usage: pass <nth> " TERMCLR(31) "<magic-type>" TERMCLR(0), __func__);
+  fprintf(stderr, " <magic> <repeat> " TERMCLR(34) "<rgen-opt>" TERMCLR(0));
   fprintf(stderr, " <nr-wargs> [<warg1> <warg2> ...]\n");
-  fprintf(stderr, "%s " ANSI_ESCAPE(31) "magic-type: 0:time, 1:count" ANSI_ESCAPE(0) "\n", __func__);
+  fprintf(stderr, "%s " TERMCLR(31) "magic-type: 0:time, 1:count" TERMCLR(0) "\n", __func__);
   fprintf(stderr, "%s repeat: 0:auto\n", __func__);
-  fprintf(stderr, "%s " ANSI_ESCAPE(34) "rgen-opt: 0:sync, 1:wait, 2:nowait" ANSI_ESCAPE(0) "\n", __func__);
+  fprintf(stderr, "%s " TERMCLR(34) "rgen-opt: 0:sync, 1:wait, 2:nowait" TERMCLR(0) "\n", __func__);
   fprintf(stderr, "Compile with env FORKER_PAPI=y to enable papi (don't use with perf)\n");
   fprintf(stderr, "Run with env FORKER_PAPI_EVENTS=e1,e2,... to specify events\n");
   fprintf(stderr, "Run with env FORKER_ASYNC_SHIFT=s (?=1) to bind async-workers at core x+s\n");

@@ -54,7 +54,7 @@ typedef __uint128_t             u128;
 // X can be one of the following colors:
 // 0:black;   1:red;     2:green;  3:yellow;
 // 4:blue;    5:magenta; 6:cyan;   7:white;
-#define ANSI_ESCAPE(____code____) "\x1b[" #____code____ "m"
+#define TERMCLR(____code____) "\x1b[" #____code____ "m"
 // }}} defs
 
 // const {{{
@@ -185,20 +185,26 @@ pages_unmap(void * const ptr, const size_t size);
 // }}} mm
 
 // process/thread {{{
-  extern u64
+  extern void
+thread_get_name(const pthread_t pt, char * const name, const size_t len);
+
+  extern void
+thread_set_name(const pthread_t pt, const char * const name);
+
+  extern long
 process_get_rss(void);
 
   extern u32
-process_affinity_core_count(void);
+process_affinity_count(void);
 
   extern u32
-process_affinity_core_list(const u32 max, u32 * const cores);
+process_affinity_list(const u32 max, u32 * const cores);
 
   extern u64
 process_cpu_time_usec(void);
 
   extern void
-thread_set_affinity(const u32 cpu);
+thread_pin(const u32 cpu);
 
 // if args == true, argx is void **
 // if args == false, argx is void *
@@ -207,9 +213,6 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
 
   extern int
 thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg);
-
-  extern u32
-thread_get_core(void);
 // }}} process/thread
 
 // locking {{{
@@ -284,8 +287,6 @@ mutex_unlock(mutex * const lock);
 // }}} locking
 
 // coroutine {{{
-#if defined(__x86_64__)
-
 extern u64 co_switch_stack(u64 * const saversp, const u64 newrsp, const u64 retval);
 
 struct co;
@@ -348,8 +349,6 @@ corr_exit(void);
 
   extern void
 corr_destroy(struct corr * const co);
-
-#endif // __x86_64__
 // }}} coroutine
 
 // bits {{{
@@ -378,13 +377,19 @@ bits_p2_up_u64(const u64 v);
 bits_p2_up_u32(const u32 v);
 
   extern u64
-bits_p2_down(const u64 v);
+bits_p2_down_u64(const u64 v);
 
   extern u64
 bits_round_up(const u64 v, const u8 power);
 
   extern u64
 bits_round_up_a(const u64 v, const u64 a);
+
+  extern u64
+bits_round_down(const u64 v, const u8 power);
+
+  extern u64
+bits_round_down_a(const u64 v, const u64 a);
 
   extern u32
 vi128_estimate(const u64 v);
@@ -468,19 +473,19 @@ slab_reserve_unsafe(struct slab * const slab, const u64 nr);
 slab_alloc_unsafe(struct slab * const slab);
 
   extern void *
-slab_alloc(struct slab * const slab);
+slab_alloc_safe(struct slab * const slab);
 
   extern void
 slab_free_unsafe(struct slab * const slab, void * const ptr);
 
   extern void
-slab_free(struct slab * const slab, void * const ptr);
+slab_free_safe(struct slab * const slab, void * const ptr);
 
   extern u64
-slab_get_inuse(struct slab * const slab);
+slab_get_nalloc(struct slab * const slab);
 
   extern u64
-slab_get_ready(struct slab * const slab);
+slab_get_nready(struct slab * const slab);
 
   extern void
 slab_destroy(struct slab * const slab);
@@ -653,8 +658,8 @@ struct rgen;
 
 typedef u64 (*rgen_next_func)(struct rgen * const);
 
-extern struct rgen * rgen_new_const(const double percentile, const double range);
-extern struct rgen * rgen_new_exp(const double percentile, const double range);
+extern struct rgen * rgen_new_const(const u64 c);
+extern struct rgen * rgen_new_expo(const double percentile, const double range);
 extern struct rgen * rgen_new_incs(const u64 min, const u64 max);
 extern struct rgen * rgen_new_incu(const u64 min, const u64 max);
 extern struct rgen * rgen_new_skips(const u64 min, const u64 max, const s64 inc);
@@ -760,6 +765,36 @@ qsbr_wait(struct qsbr * const q, const u64 target);
 qsbr_destroy(struct qsbr * const q);
 // }}} rcu
 
+// server {{{
+struct server;
+
+struct server_wi;
+
+  extern struct server *
+server_create(const char * const host, const char * const port,
+    void * (* worker)(void *), void * const priv);
+
+// wait and clean up
+  extern void
+server_wait_destroy(struct server * const server);
+
+// kill and clean up
+  extern void
+server_kill_destroy(struct server * const server);
+
+  extern int
+server_worker_fd(struct server_wi * const wi);
+
+  extern void *
+server_worker_priv(struct server_wi * const wi);
+
+  extern void
+server_worker_exit(struct server_wi * const wi);
+
+  extern int
+client_connect(const char * const host, const char * const port);
+// }}} server
+
 // forker {{{
 #define FORKER_END_TIME ((0))
 #define FORKER_END_COUNT ((1))
@@ -769,8 +804,7 @@ typedef void * (*forker_worker_func)(void *);
 
 struct pass_info {
   struct rgen * gen0;
-  const struct kvmap_api * api;
-  void * map;
+  void * passdata[2]; // if not testing kv
   u64 vctr_size;
   forker_worker_func wf;
   forker_perf_analyze_func af;
@@ -784,8 +818,7 @@ struct forker_papi_info {
 struct forker_worker_info {
   struct rgen * gen;
   rgen_next_func rgen_next;
-  const struct kvmap_api * api;
-  void * map;
+  void * passdata[2]; // if not testing kv
   void * priv;
   u32 end_type;
   u64 end_magic;
