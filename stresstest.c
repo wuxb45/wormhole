@@ -246,8 +246,8 @@ main(int argc, char ** argv)
       const double mops = ((double)tot) * 1e3 / ((double)dt);
       char ts[64];
       time_stamp(ts, 64);
-      const u64 rssk = process_get_rss() >> 12;
-      printf("%s e %lu r %lu th %lu tot %lu mops %.2lf rss %lukB wfail %lu\n",
+      const long rssk = process_get_rss();
+      printf("%s e %lu r %lu th %lu tot %lu mops %.2lf rss %ldkB wfail %lu\n",
           ts, e, r, nworker, tot, mops, rssk, wfail);
       debug_perf_switch();
     }
