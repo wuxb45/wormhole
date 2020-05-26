@@ -161,10 +161,16 @@ alloc_fail(void);
 #endif
 
   extern void *
-xalloc(const u64 align, const u64 size);
+xalloc(const size_t align, const size_t size);
 
   extern void *
-yalloc(const u64 size);
+yalloc(const size_t size);
+
+  extern void **
+malloc_2d(const size_t nr, const size_t size);
+
+  extern void **
+calloc_2d(const size_t nr, const size_t size);
 
 /* hugepages */
 // force posix allocators: -DVALGRIND_MEMCHECK
@@ -565,6 +571,21 @@ xlog_iter_next(struct xlog_iter * const iter, void * const out);
 
 // string {{{
 // size of out should be >= 10
+  extern void
+str10_u32(void * const out, const u32 v);
+
+// size of out should be >= 20
+  extern void
+str10_u64(void * const out, const u64 v);
+
+// size of out should be >= 8
+  extern void
+str16_u32(void * const out, const u32 v);
+
+// size of out should be >= 16
+  extern void
+str16_u64(void * const out, const u64 v);
+
   extern u64
 a2u64(const void * const str);
 
@@ -589,13 +610,19 @@ struct damp;
 damp_create(const u64 cap, const double dshort, const double dlong);
 
   extern double
-damp_average(const struct damp * const d);
+damp_avg(const struct damp * const d);
 
   extern double
 damp_min(const struct damp * const d);
 
   extern double
 damp_max(const struct damp * const d);
+
+  extern void
+damp_add(struct damp * const d, const double v);
+
+  extern bool
+damp_test(struct damp * const d);
 
   extern bool
 damp_add_test(struct damp * const d, const double v);
@@ -614,7 +641,7 @@ struct vctr;
 vctr_create(const size_t nr);
 
   extern size_t
-vctr_size(struct vctr * const v);
+vctr_size(const struct vctr * const v);
 
   extern void
 vctr_add(struct vctr * const v, const u64 i, const size_t n);
@@ -632,7 +659,7 @@ vctr_add1_atomic(struct vctr * const v, const u64 i);
 vctr_set(struct vctr * const v, const u64 i, const size_t n);
 
   extern size_t
-vctr_get(struct vctr * const v, const u64 i);
+vctr_get(const struct vctr * const v, const u64 i);
 
   extern void
 vctr_merge(struct vctr * const to, const struct vctr * const from);
@@ -706,7 +733,7 @@ rgen_async_wait(struct rgen * const gen);
 rgen_async_wait_all(struct rgen * const gen);
 // }}} rgen
 
-// rcu {{{
+// multi-rcu {{{
 struct rcu_node;
 
   extern struct rcu_node *
@@ -743,7 +770,9 @@ rcu_unref(struct rcu * const rcu, void * const ptr, const u64 magic);
 
   extern void
 rcu_update(struct rcu * const rcu, void * const ptr);
+// }}} multi-rcu
 
+// qsbr {{{
 struct qsbr;
 
   extern void
@@ -763,7 +792,7 @@ qsbr_wait(struct qsbr * const q, const u64 target);
 
   extern void
 qsbr_destroy(struct qsbr * const q);
-// }}} rcu
+// }}} qsbr
 
 // server {{{
 struct server;
@@ -798,7 +827,7 @@ client_connect(const char * const host, const char * const port);
 // forker {{{
 #define FORKER_END_TIME ((0))
 #define FORKER_END_COUNT ((1))
-typedef bool (*forker_perf_analyze_func)(struct vctr * const, const u64, struct damp * const, char * const);
+typedef bool (*forker_perf_analyze_func)(const u64, const struct vctr *, struct damp *, char *);
 
 typedef void * (*forker_worker_func)(void *);
 
@@ -810,17 +839,13 @@ struct pass_info {
   forker_perf_analyze_func af;
 };
 
-struct forker_papi_info {
-  u64 nr;
-  int events[];
-};
-
 struct forker_worker_info {
   struct rgen * gen;
   rgen_next_func rgen_next;
   void * passdata[2]; // if not testing kv
   void * priv;
   u32 end_type;
+  u32 padding;
   u64 end_magic;
   struct vctr * vctr;
   u64 worker_id; // <= conc
@@ -831,8 +856,7 @@ struct forker_worker_info {
   u64 seed;
   void * (*thread_func)(void *);
   // PAPI
-  struct forker_papi_info * papi_info;
-  struct vctr * papi_vctr;
+  u64 papi_vctr_base;
 };
 
   extern int

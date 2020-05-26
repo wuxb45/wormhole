@@ -419,7 +419,7 @@ realloc(void *ptr, size_t size)
 #endif // ALLOC_FAIL
 
   inline void *
-xalloc(const u64 align, const u64 size)
+xalloc(const size_t align, const size_t size)
 {
 #ifdef ALLOCFAIL
   if (alloc_fail())
@@ -435,9 +435,29 @@ xalloc(const u64 align, const u64 size)
 
 // alloc cache-line aligned address
   inline void *
-yalloc(const u64 size)
+yalloc(const size_t size)
 {
   return xalloc(64, size);
+}
+
+  void **
+malloc_2d(const size_t nr, const size_t size)
+{
+  const size_t size1 = nr * sizeof(void *);
+  const size_t size2 = nr * size;
+  void ** const mem = malloc(size1 + size2);
+  u8 * const mem2 = ((u8 *)mem) + size1;
+  for (size_t i = 0; i < nr; i++)
+    mem[i] = mem2 + (i * size);
+  return mem;
+}
+
+  inline void **
+calloc_2d(const size_t nr, const size_t size)
+{
+  void ** const ret = malloc_2d(nr, size);
+  memset(ret[0], 0, nr * size);
+  return ret;
 }
 
   inline void
@@ -791,7 +811,7 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
     nr = FORK_JOIN_MAX;
   }
 
-  u32 cores[process_ncpu];
+  u32 cores[CPU_SETSIZE];
   u32 ncores = process_affinity_list(process_ncpu, cores);
   if (ncores == 0) { // force to use all cores
     ncores = process_ncpu;
@@ -961,10 +981,10 @@ rwlock_init(rwlock * const lock)
 rwlock_trylock_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  if ((atomic_fetch_add(pvar, 1) >> RWLOCK_WSHIFT) == 0) {
+  if ((atomic_fetch_add_explicit(pvar, 1, memory_order_acquire) >> RWLOCK_WSHIFT) == 0) {
     return true;
   } else {
-    atomic_fetch_sub(pvar, 1);
+    atomic_fetch_sub_explicit(pvar, 1, memory_order_release);
     return false;
   }
 }
@@ -974,17 +994,17 @@ rwlock_trylock_read(rwlock * const lock)
 rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  if ((atomic_fetch_add(pvar, 1) >> RWLOCK_WSHIFT) == 0)
+  if ((atomic_fetch_add_explicit(pvar, 1, memory_order_acquire) >> RWLOCK_WSHIFT) == 0)
     return true;
 
 #pragma nounroll
   do { // someone already locked; wait for a little while
     cpu_pause();
-    if ((atomic_load(pvar) >> RWLOCK_WSHIFT) == 0)
+    if ((atomic_load_explicit(pvar, memory_order_consume) >> RWLOCK_WSHIFT) == 0)
       return true;
   } while (nr--);
 
-  atomic_fetch_sub(pvar, 1);
+  atomic_fetch_sub_explicit(pvar, 1, memory_order_release);
   return false;
 }
 
@@ -1003,7 +1023,7 @@ rwlock_lock_read(rwlock * const lock)
 #else
       cpu_pause();
 #endif
-    } while (atomic_load(pvar) >> RWLOCK_WSHIFT);
+    } while (atomic_load_explicit(pvar, memory_order_consume) >> RWLOCK_WSHIFT);
   } while (true);
 }
 
@@ -1011,15 +1031,15 @@ rwlock_lock_read(rwlock * const lock)
 rwlock_unlock_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  atomic_fetch_sub(pvar, 1);
+  atomic_fetch_sub_explicit(pvar, 1, memory_order_release);
 }
 
   inline bool
 rwlock_trylock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  lock_v v0 = atomic_load(pvar);
-  return (v0 == 0) && atomic_compare_exchange_weak(pvar, &v0, RWLOCK_WBIT);
+  lock_v v0 = atomic_load_explicit(pvar, memory_order_consume);
+  return (v0 == 0) && atomic_compare_exchange_weak_explicit(pvar, &v0, RWLOCK_WBIT, memory_order_acquire, memory_order_relaxed);
 }
 
 // actually nr + 1
@@ -1050,7 +1070,7 @@ rwlock_lock_write(rwlock * const lock)
 #else
       cpu_pause();
 #endif
-    } while (atomic_load(pvar));
+    } while (atomic_load_explicit(pvar, memory_order_consume));
   } while (true);
 }
 
@@ -1058,7 +1078,7 @@ rwlock_lock_write(rwlock * const lock)
 rwlock_unlock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  atomic_fetch_sub(pvar, RWLOCK_WBIT);
+  atomic_fetch_sub_explicit(pvar, RWLOCK_WBIT, memory_order_release);
 }
 
   inline void
@@ -1066,7 +1086,7 @@ rwlock_write_to_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   // +R -W
-  atomic_fetch_add(pvar, ((lock_v)1) - RWLOCK_WBIT);
+  atomic_fetch_add_explicit(pvar, ((lock_v)1) - RWLOCK_WBIT, memory_order_acq_rel);
 }
 
 #undef RWLOCK_WSHIFT
@@ -2098,119 +2118,74 @@ qsort_double_sample(const double * const array0, const u64 nr, const u64 res, FI
 }
 // }}} qsort
 
-// xlog {{{
-struct xlog {
-  u64 nr_rec;
-  u64 nr_cap;
-  u64 unit_size;
-  u8 * ptr;
-};
+// string {{{
+static u16 str10_table[100];
 
-  struct xlog *
-xlog_create(const u64 nr_init, const u64 unit_size)
+__attribute__((constructor))
+  static void
+str10_init(void)
 {
-  struct xlog * const xlog = yalloc(sizeof(*xlog));
-  debug_assert(xlog);
-  xlog->nr_rec = 0;
-  xlog->nr_cap = nr_init ? nr_init : 4096;
-  debug_assert(unit_size);
-  xlog->unit_size = unit_size;
-
-  xlog->ptr = malloc(xlog->unit_size * xlog->nr_cap);
-  debug_assert(xlog->ptr);
-  return xlog;
-}
-
-  static bool
-xlog_enlarge(struct xlog * const xlog)
-{
-  const u64 new_cap = (xlog->nr_cap < (1lu<<20)) ? (xlog->nr_cap * 2) : (xlog->nr_cap + (1lu<<20));
-  void * const new_ptr = realloc(xlog->ptr, xlog->unit_size * new_cap);
-  if (new_ptr == NULL)
-    return false;
-  xlog->ptr = new_ptr;
-  xlog->nr_cap = new_cap;
-  return true;
-}
-
-  void
-xlog_append(struct xlog * const xlog, const void * const rec)
-{
-  if ((xlog->nr_rec == xlog->nr_cap) && (!xlog_enlarge(xlog)))
-    return;
-
-  u8 * const ptr = xlog->ptr + (xlog->nr_rec * xlog->unit_size);
-  memcpy(ptr, rec, xlog->unit_size);
-  xlog->nr_rec++;
-}
-
-  void
-xlog_append_cycle(struct xlog * const xlog, const void * const rec)
-{
-  if (xlog->nr_rec == xlog->nr_cap)
-    xlog->nr_rec = 0;
-  xlog_append(xlog, rec);
-}
-
-  void
-xlog_reset(struct xlog * const xlog)
-{
-  xlog->nr_rec = 0;
-}
-
-  u64
-xlog_read(struct xlog * const xlog, void * const buf, const u64 nr_max)
-{
-  const u64 nr = (xlog->nr_rec < nr_max) ? xlog->nr_rec : nr_max;
-  memcpy(buf, xlog->ptr, nr * xlog->unit_size);
-  return nr;
-}
-
-  void
-xlog_dump(struct xlog * const xlog, FILE * const out)
-{
-  const size_t nd = fwrite(xlog->ptr, xlog->unit_size, xlog->nr_rec, out);
-  (void)nd;
-  debug_assert(nd == xlog->nr_rec);
-}
-
-  void
-xlog_destroy(struct xlog * const xlog)
-{
-  free(xlog->ptr);
-  free(xlog);
-}
-
-struct xlog_iter {
-  const struct xlog * xlog;
-  u64 next_id;
-};
-
-  struct xlog_iter *
-xlog_iter_create(const struct xlog * const xlog)
-{
-  struct xlog_iter * const iter = malloc(sizeof(*iter));
-  iter->xlog = xlog;
-  iter->next_id = 0;
-  return iter;
-}
-
-  bool
-xlog_iter_next(struct xlog_iter * const iter, void * const out)
-{
-  const struct xlog * const xlog = iter->xlog;
-  if (iter->next_id < xlog->nr_rec) {
-    void * const ptr = xlog->ptr + (xlog->unit_size * iter->next_id);
-    memcpy(out, ptr, xlog->unit_size);
-    iter->next_id++;
-    return true;
-  } else {
-    return false;
+  for (u8 i = 0; i < 100; i++) {
+    const u8 hi = (typeof(hi))('0' + (i / 10));
+    const u8 lo = (typeof(lo))('0' + (i % 10));
+    str10_table[i] = (lo << 8) | hi;
   }
 }
-// }}} xlog
 
-// string {{{
+// output 10 bytes
+  void
+str10_u32(void * const out, const u32 v)
+{
+  u32 vv = v;
+  u16 * const ptr = (typeof(ptr))out;
+  for (u64 i = 4; i <= 4; i--) { // x5
+    ptr[i] = str10_table[vv % 100];
+    vv /= 100u;
+  }
+}
+
+// output 20 bytes
+  void
+str10_u64(void * const out, const u64 v)
+{
+  u64 vv = v;
+  u16 * const ptr = (typeof(ptr))out;
+  for (u64 i = 9; i <= 9; i--) { // x10
+    ptr[i] = str10_table[vv % 100];
+    vv /= 100;
+  }
+}
+
+static u16 str16_table[256];
+
+__attribute__((constructor))
+  static void
+str16_init(void)
+{
+  const u8 hex[16] = { '0','1','2','3','4','5','6','7','8','9',
+    'a','b','c','d','e','f'};
+  for (u64 i = 0; i < 256; i++)
+    str16_table[i] = (((u16)hex[i & 0xf]) << 8) | (hex[i>>4]);
+}
+
+// output 8 bytes
+  void
+str16_u32(void * const out, const u32 v)
+{
+  u16 * const ptr = (typeof(ptr))out;
+  for (u64 i = 0; i < 4; i++)
+    ptr[3-i] = str16_table[(v >> (i << 3)) & 0xff];
+}
+
+// output 16 bytes
+  void
+str16_u64(void * const out, const u64 v)
+{
+  u16 * const ptr = (typeof(ptr))out;
+  for (u64 i = 0; i < 8; i++)
+    ptr[7-i] = str16_table[(v >> (i << 3)) & 0xff];
+}
+
 // string to u64
   inline u64
 a2u64(const void * const str)
@@ -2296,9 +2271,8 @@ fail_buf:
 // damp {{{
 struct damp {
   u64 cap;
-  u64 used;
-  u64 next;
-  u64 events;
+  u64 nr; // <= cap
+  u64 nr_added; // +1 every time
   double dshort;
   double dlong;
   double hist[];
@@ -2309,73 +2283,68 @@ damp_create(const u64 cap, const double dshort, const double dlong)
 {
   struct damp * const d = malloc(sizeof(*d) + (sizeof(d->hist[0]) * cap));
   d->cap = cap;
-  d->used = 0;
-  d->next = 0;
-  d->events = 0;
+  d->nr = 0;
+  d->nr_added = 0;
   d->dshort = dshort;
   d->dlong = dlong;
   return d;
 }
 
   double
-damp_average(const struct damp * const d)
+damp_avg(const struct damp * const d)
 {
-  if (d->used == 0)
-    return 0.0;
-  const u64 start = d->next - d->used;
   double sum = 0.0;
-  for (u64 i = 0; i < d->used; i++) {
-    const u64 idx = (start + i) % d->cap;
-    sum += d->hist[idx];
-  }
-  const double avg = sum / ((double)d->used);
+  for (u64 i = 0; i < d->nr; i++)
+    sum += d->hist[i];
+  const double avg = sum / ((double)d->nr);
   return avg;
 }
 
   double
 damp_min(const struct damp * const d)
 {
-  if (d->used == 0)
+  if (d->nr == 0)
     return 0.0;
-  const u64 start = d->next - d->used;
-  double min = d->hist[start % d->cap];
-  for (u64 i = 1; i < d->used; i++) {
-    const u64 idx = (start + i) % d->cap;
-    const double v = d->hist[idx];
-    if (v < min) min = v;
-  }
+  double min = d->hist[0];
+  for (u64 i = 1; i < d->nr; i++)
+    if (d->hist[i] < min)
+      min = d->hist[i];
   return min;
 }
 
   double
 damp_max(const struct damp * const d)
 {
-  if (d->used == 0)
+  if (d->nr == 0)
     return 0.0;
-  const u64 start = d->next - d->used;
-  double max = d->hist[start % d->cap];
-  for (u64 i = 1; i < d->used; i++) {
-    const u64 idx = (start + i) % d->cap;
-    const double v = d->hist[idx];
-    if (v > max) max = v;
-  }
+  double max = d->hist[0];
+  for (u64 i = 1; i < d->nr; i++)
+    if (d->hist[i] > max)
+      max = d->hist[i];
   return max;
 }
 
-  bool
-damp_add_test(struct damp * const d, const double v)
+  void
+damp_add(struct damp * const d, const double v)
 {
-  d->hist[d->next] = v;
-  d->next = (d->next + 1) % d->cap;
-  if (d->used < d->cap) d->used++;
-  d->events++;
+  if (d->nr < d->cap) {
+    d->hist[d->nr] = v;
+    d->nr++;
+  } else { // already full
+    memmove(d->hist, d->hist+1, sizeof(d->hist[0]) * (d->nr-1));
+    d->hist[d->nr-1] = v;
+  }
+  d->nr_added++;
+}
 
+  bool
+damp_test(struct damp * const d)
+{
   // short-distance history
-  const u64 end = d->next - 1;
-  if (d->used >= 3) {
-    const double v0 = d->hist[(end - 0) % d->cap];
-    const double v1 = d->hist[(end - 1) % d->cap];
-    const double v2 = d->hist[(end - 2) % d->cap];
+  if (d->nr >= 3) { // at least three times
+    const double v0 = d->hist[d->nr - 1];
+    const double v1 = d->hist[d->nr - 2];
+    const double v2 = d->hist[d->nr - 3];
     const double dd = v0 * d->dshort;
     const double d01 = fabs(v1 - v0);
     const double d02 = fabs(v2 - v0);
@@ -2384,28 +2353,29 @@ damp_add_test(struct damp * const d, const double v)
   }
 
   // full-distance history
-  const double avg = damp_average(d);
-  const double dev = avg * d->dlong;
-  if (d->used == d->cap) {
-    double min = d->hist[0];
-    double max = min;
-    for (u64 i = 1; i < d->cap; i++) {
-      if (d->hist[i] < min) min = d->hist[i];
-      if (d->hist[i] > max) max = d->hist[i];
-    }
-    if (fabs(max - min) < dev)
+  if (d->nr == d->cap) {
+    const double avg = damp_avg(d);
+    const double dev = avg * d->dlong;
+    if (fabs(damp_max(d) - damp_min(d)) < dev)
       return true;
   }
 
-  return d->events >= (d->cap * 2);
+  // not too many times
+  return d->nr_added >= (d->cap * 2);
+}
+
+  bool
+damp_add_test(struct damp * const d, const double v)
+{
+  damp_add(d, v);
+  return damp_test(d);
 }
 
   void
 damp_clean(struct damp * const d)
 {
-  d->used = 0;
-  d->next = 0;
-  d->events = 0;
+  d->nr = 0;
+  d->nr_added = 0;
 }
 
   void
@@ -2433,7 +2403,7 @@ vctr_create(const size_t nr)
 }
 
   inline size_t
-vctr_size(struct vctr * const v)
+vctr_size(const struct vctr * const v)
 {
   return v->nr;
 }
@@ -2456,14 +2426,14 @@ vctr_add1(struct vctr * const v, const u64 i)
 vctr_add_atomic(struct vctr * const v, const u64 i, const size_t n)
 {
   if (i < v->nr)
-    (void)atomic_fetch_add(&(v->u[i].av), n);
+    (void)atomic_fetch_add_explicit(&(v->u[i].av), n, memory_order_relaxed);
 }
 
   inline void
 vctr_add1_atomic(struct vctr * const v, const u64 i)
 {
   if (i < v->nr)
-    (void)atomic_fetch_add(&(v->u[i].av), 1);
+    (void)atomic_fetch_add_explicit(&(v->u[i].av), 1, memory_order_relaxed);
 }
 
   inline void
@@ -2474,7 +2444,7 @@ vctr_set(struct vctr * const v, const u64 i, const size_t n)
 }
 
   size_t
-vctr_get(struct vctr * const v, const u64 i)
+vctr_get(const struct vctr * const v, const u64 i)
 {
   return (i < v->nr) ?  v->u[i].v : 0;
 }
@@ -3416,8 +3386,6 @@ rgen_async_convert(struct rgen * const gen, const u32 cpu)
 
 // }}} rgen
 
-// rcu {{{
-
 // multi-rcu {{{
 
 // bits 63 -- 16 value (pointer)
@@ -3577,10 +3545,11 @@ rcu_update(struct rcu * const rcu, void * const ptr)
 // qsbr {{{
 #define QSBR_STATES_NR ((22)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
 #define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1)
-#define QSBR_SHARDS_BITS ((5))
-#define QSBR_SHARDS_NR  (((1lu) << QSBR_SHARDS_BITS))
-#define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARDS_NR))
-#define QSBR_MHASH_SHIFT ((32 - QSBR_SHARDS_BITS))
+#define QSBR_SHARD_BITS  ((5)) // bits <= 6
+#define QSBR_SHARD_NR    (((1u) << QSBR_SHARD_BITS))
+#define QSBR_SHARD_MASK  ((QSBR_SHARD_NR - 1))
+#define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARD_NR))
+#define QSBR_MHASH_SHIFT ((32 - QSBR_SHARD_BITS))
 
 // Quiescent-State-Based Reclamation RCU
 struct qsbr {
@@ -3588,9 +3557,9 @@ struct qsbr {
   u64 padding0[7];
   struct qshard {
     spinlock lock;
-    u64 bitmap;
-    volatile u64 * ptrs[QSBR_STATES_NR];
-  } shards[QSBR_SHARDS_NR];
+    volatile u64 bitmap;
+    volatile u64 * volatile ptrs[QSBR_STATES_NR];
+  } shards[QSBR_SHARD_NR];
   volatile u64 * wait_ptrs[QSBR_CAPACITY];
 };
 
@@ -3599,7 +3568,7 @@ qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
   memset(q, 0, sizeof(*q));
-  for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
+  for (u32 i = 0; i < QSBR_SHARD_NR; i++)
     spinlock_init(&q->shards[i].lock);
   return q;
 }
@@ -3607,8 +3576,8 @@ qsbr_create(void)
   static inline struct qshard *
 qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
 {
-  const u32 sid = crc32c_u64(0, (u64)ptr) >> QSBR_MHASH_SHIFT;
-  debug_assert(sid < QSBR_SHARDS_NR);
+  const u32 sid = crc32c_u64(0, (u64)ptr) & QSBR_SHARD_MASK;
+  debug_assert(sid < QSBR_SHARD_NR);
   return &(q->shards[sid]);
 }
 
@@ -3618,14 +3587,12 @@ qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
   debug_assert(ptr);
   struct qshard * const shard = qsbr_shard(q, ptr);
   spinlock_lock(&(shard->lock));
-  cpu_cfence();
-
-  if (shard->bitmap < QSBR_BITMAP_FULL) {
-    const u32 pos = (u32)__builtin_ctzl(~(shard->bitmap));
+  const u64 bits = shard->bitmap;
+  if (bits < QSBR_BITMAP_FULL) {
+    const u32 pos = (u32)__builtin_ctzl(~bits);
     debug_assert(pos < QSBR_STATES_NR);
     shard->bitmap |= (1lu << pos);
     shard->ptrs[pos] = ptr;
-    cpu_cfence();
     spinlock_unlock(&(shard->lock));
     return true;
   }
@@ -3636,33 +3603,25 @@ qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
   void
 qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 {
-  if (ptr == NULL)
-    return;
+  debug_assert(ptr);
   struct qshard * const shard = qsbr_shard(q, ptr);
-#pragma nounroll
-  while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
-    (*ptr) = q->target;
-#if defined(CORR)
-    corr_yield();
-#endif
-  }
-
-  cpu_cfence();
-  u64 bits = shard->bitmap;
-  debug_assert(bits <= QSBR_BITMAP_FULL);
-  while (bits) { // bits contains ones
+  for (u64 bits = shard->bitmap; bits; bits &= (bits - 1)) {
     const u32 pos = (u32)__builtin_ctzl(bits);
     debug_assert(pos < QSBR_STATES_NR);
     if (shard->ptrs[pos] == ptr) {
+      shard->ptrs[pos] = &q->target;
+#pragma nounroll
+      while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
+#if defined(CORR)
+        corr_yield();
+#endif
+      }
       shard->bitmap &= ~(1lu << pos);
-      shard->ptrs[pos] = NULL;
-      cpu_cfence();
       spinlock_unlock(&(shard->lock));
       return;
     }
-    bits &= ~(1lu << pos);
   }
-  debug_die();
+  debug_die(); // bad ptr
 }
 
 // waiters needs external synchronization
@@ -3670,42 +3629,34 @@ qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
 qsbr_wait(struct qsbr * const q, const u64 target)
 {
   q->target = target;
-  for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
-    spinlock_lock(&(q->shards[i].lock));
-  cpu_cfence();
-
-  // collect wait_ptrs
-  volatile u64 ** const wait_ptrs = q->wait_ptrs;
-  u64 nwait = 0;
-  for (u64 i = 0; i < QSBR_SHARDS_NR; i++) {
-    struct qshard * const shard = &(q->shards[i]);
-    u64 bits = shard->bitmap;
-    while (bits) { // bits contains ones
-      const u32 pos = (u32)__builtin_ctzl(bits);
-      debug_assert(pos < QSBR_STATES_NR);
-      if (*(shard->ptrs[pos]) != target)
-        wait_ptrs[nwait++] = shard->ptrs[pos];
-      bits &= ~(1lu << pos);
-    }
+  u64 cbits = 0; // check-bits
+  u64 bms[QSBR_SHARD_NR]; // copy of all bitmap
+  // take an unsafe snapshot of active users
+  for (u32 i = 0; i < QSBR_SHARD_NR; i++) {
+    bms[i] = q->shards[i].bitmap;
+    if (bms[i])
+      cbits |= (1lu << i); // set to 1 if [i] has ptrs
   }
 
-  // wait
-  while (nwait) {
-    for (u64 i = nwait - 1; i + 1; i--) { // nwait - 1 to 0
-      if ((*(wait_ptrs[i])) == target) {
-        // erase i
-        if (i < (nwait - 1))
-          wait_ptrs[i] = wait_ptrs[nwait - 1];
-        nwait--;
+  while (cbits) {
+    for (u64 ctmp = cbits; ctmp; ctmp &= (ctmp - 1)) {
+      const u32 i = (u32)__builtin_ctzl(ctmp);
+      struct qshard * const shard = &(q->shards[i]);
+      spinlock_lock(&shard->lock);
+      for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
+        u64 bit = bits & -bits;
+        if (((shard->bitmap & bit) == 0) || ((*(shard->ptrs[__builtin_ctzl(bit)])) == target))
+          bms[i] &= ~bit;
       }
+      spinlock_unlock(&shard->lock);
+      if (bms[i] == 0)
+        cbits &= ~(1lu << i);
     }
 #if defined(CORR)
     corr_yield();
 #endif
   }
-  cpu_cfence();
-  for (u64 i = 0; i < QSBR_SHARDS_NR; i++)
-    spinlock_unlock(&(q->shards[i].lock));
+  debug_assert(cbits == 0);
 }
 
   void
@@ -3717,8 +3668,6 @@ qsbr_destroy(struct qsbr * const q)
 #undef QSBR_STATES_NR
 #undef QSBR_BITMAP_NR
 // }}} qsbr
-
-// }}} rcu
 
 // server {{{
 struct server {
@@ -3885,125 +3834,97 @@ client_connect(const char * const host, const char * const port)
 // }}} server
 
 // forker {{{
+#define FORKER_PAPI_MAX_EVENTS ((14))
+static u64 forker_papi_nr = 0;
 
-// forker-papi {{{
 #ifdef FORKER_PAPI
 #include <papi.h>
-#define FORKER_PAPI_MAX_EVENTS ((32))
+static int forker_papi_events[FORKER_PAPI_MAX_EVENTS] = {};
+static char ** forker_papi_tokens = NULL;
 __attribute__((constructor))
   static void
 forker_papi_init(void)
 {
   PAPI_library_init(PAPI_VER_CURRENT);
   PAPI_thread_init(pthread_self);
+
+  char ** const tokens = string_tokens(getenv("FORKER_PAPI_EVENTS"), ",");
+  if (tokens == NULL)
+    return;
+  u64 nr = 0;
+  while (tokens[nr] && (nr < FORKER_PAPI_MAX_EVENTS)) {
+    if (PAPI_OK == PAPI_event_name_to_code(tokens[nr], &forker_papi_events[nr]))
+      nr++;
+  }
+  forker_papi_nr = nr;
+  forker_papi_tokens = tokens;
+}
+
+__attribute__((destructor))
+  static void
+forker_papi_deinit(void)
+{
+  //PAPI_shutdown(); // even more memory leaks
+  free(forker_papi_tokens);
 }
 
   static void *
-forker_thread_func(void * const ptr)
+forker_papi_thread_func(void * const ptr)
 {
   struct forker_worker_info * const wi = (typeof(wi))ptr;
-  struct forker_papi_info * const papi_info = wi->papi_info;
-  bool papi = false;
+  bool papi_ok = false;
   int es = PAPI_NULL;
-  if (papi_info && papi_info->nr && (PAPI_create_eventset(&es) == PAPI_OK)) {
-    if (PAPI_OK == PAPI_add_events(es, papi_info->events, papi_info->nr)) {
+  if (forker_papi_nr && (PAPI_create_eventset(&es) == PAPI_OK)) {
+    if (PAPI_OK == PAPI_add_events(es, forker_papi_events, forker_papi_nr)) {
       PAPI_start(es);
-      papi = true;
+      papi_ok = true;
     } else {
       PAPI_destroy_eventset(&es);
     }
   }
   void * const ret = wi->thread_func(ptr);
-  if (papi) {
+  if (papi_ok) {
     u64 v[FORKER_PAPI_MAX_EVENTS];
-    if (PAPI_OK == PAPI_stop(es, (long long *)v)) {
-      for (u64 i = 0; i < papi_info->nr; i++) {
-        vctr_set(wi->papi_vctr, i, v[i]);
-      }
-    }
+    if (PAPI_OK == PAPI_stop(es, (long long *)v))
+      for (u64 i = 0; i < forker_papi_nr; i++)
+        vctr_set(wi->vctr, wi->papi_vctr_base + i, v[i]);
+
     PAPI_destroy_eventset(&es);
   }
   return ret;
 }
 
-  static struct forker_papi_info *
-forker_papi_prepare(void)
-{
-  char ** const tokens = string_tokens(getenv("FORKER_PAPI_EVENTS"), ",");
-  if (tokens == NULL)
-    return NULL;
-  u64 nr_events = 0;
-  int events[FORKER_PAPI_MAX_EVENTS]; // can't handle too much
-  for (u64 i = 0; tokens[i] && (nr_events < FORKER_PAPI_MAX_EVENTS); i++)
-    if (PAPI_OK == PAPI_event_name_to_code(tokens[i], &(events[nr_events])))
-      nr_events++;
-
-  struct forker_papi_info * const pi = malloc(sizeof(*pi) + (sizeof(pi->events[0]) * nr_events));
-  pi->nr = nr_events;
-  memcpy(pi->events, events, sizeof(pi->events[0]) * nr_events);
-  return pi;
-}
-
   static void
-forker_papi_report(struct forker_papi_info * const papi_info,
-    struct forker_worker_info ** const infov, const u64 cc, FILE * const out)
+forker_papi_print(FILE * fout, const struct vctr * const vctr, const u64 base)
 {
-  if (papi_info == NULL)
+  if (forker_papi_nr == 0)
     return;
-  struct vctr * const va = vctr_create(papi_info->nr);
-  for (u64 i = 0; i < cc; i++) {
-    debug_assert(infov[i]->papi_vctr);
-    vctr_merge(va, infov[i]->papi_vctr);
-  }
-  fprintf(out, "PAPI");
-  char name[256];
-  for (u64 i = 0; i < papi_info->nr; i++) {
-    PAPI_event_code_to_name(papi_info->events[i], name);
-    fprintf(out, " %s %lu", name, vctr_get(va, i));
-  }
-  vctr_destroy(va);
+  const bool use_color = isatty(fileno(fout));
+  if (use_color)
+    fputs(TERMCLR(36), fout);
+  fprintf(fout, "PAPI %lu ", forker_papi_nr);
+  for (u64 i = 0; i < forker_papi_nr; i++)
+    fprintf(fout, "%s %lu ", forker_papi_tokens[i]+5, vctr_get(vctr, base+i));
+  if (use_color)
+    fputs(TERMCLR(0), fout);
 }
-#undef FORKER_PAPI_MAX_EVENTS
-#else // no papi
-
-  static void *
-forker_thread_func(void * const ptr)
-{
-  struct forker_worker_info * const wi = (typeof(wi))ptr;
-  return wi->thread_func(ptr);
-}
-
-  static struct forker_papi_info *
-forker_papi_prepare(void)
-{
-  return NULL;
-}
+#endif // FORKER_PAPI
 
   static void
-forker_papi_report(struct forker_papi_info * const papi_info,
-    struct forker_worker_info ** const infov, const u64 cc, FILE * const out)
-{
-  (void)papi_info;
-  (void)infov;
-  (void)cc;
-  (void)out;
-  return;
-}
-#endif
-// }}} forker-papi
-
-  static void
-forker_pass_print(FILE * fout, char ** const pref,
-    int argc, char ** const argv, char * const msg)
+forker_pass_print(FILE * fout, char ** const pref, int argc, char ** const argv, char * const msg)
 {
   for (int i = 0; pref[i]; i++)
     fprintf(fout, "%s ", pref[i]);
   for (int i = 0; i < argc; i++)
     fprintf(fout, "%s ", argv[i]);
-  if (isatty(fileno(fout)))
-    fprintf(fout, TERMCLR(34) "%s" TERMCLR(0), msg);
-  else
-    fprintf(fout, "%s", msg);
+
+  const bool use_color = isatty(fileno(fout));
+  if (use_color)
+    fputs(TERMCLR(34), fout);
+  fputs(msg, fout);
+  if (use_color)
+    fputs(TERMCLR(0), fout);
+
   fflush(fout);
 }
 
@@ -4011,9 +3932,8 @@ forker_pass_print(FILE * fout, char ** const pref,
 forker_pass(const int argc, char ** const argv, char ** const pref,
     struct pass_info * const pi, const int nr_wargs0)
 {
-#define FORKER_GEN_OPT_SYNC   ((0))
-#define FORKER_GEN_OPT_WAIT   ((1))
-#define FORKER_GEN_OPT_NOWAIT ((2))
+#define FORKER_GEN_SYNC   ((0))
+#define FORKER_GEN_NOWAIT ((2))
   // pass <nth> <end-type> <magic> <repeat> <rgen_opt> <nr_wargs> ...
 #define PASS_NR_ARGS ((7))
   if ((argc < PASS_NR_ARGS) || (strcmp(argv[0], "pass") != 0))
@@ -4032,110 +3952,103 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     return -1;
 
   const u32 nr_cores = process_affinity_count();
-  u32 cores[nr_cores];
+  u32 cores[CPU_SETSIZE];
   process_affinity_list(nr_cores, cores);
   struct damp * const damp = damp_create(7, 0.004, 0.05);
-  struct forker_papi_info * const papi_info = forker_papi_prepare();
   const char * const ascfg = getenv("FORKER_ASYNC_SHIFT");
   const u32 async_shift = ascfg ? ((u32)a2s32(ascfg)) : 1;
 
   char out[1024] = {};
   // per-worker data
-  struct forker_worker_info info[cc];
-  struct forker_worker_info *infov[cc];
+  struct forker_worker_info ** const wis = (typeof(wis))calloc_2d(cc, sizeof(*wis[0]));
   for (u32 i = 0; i < cc; i++) {
-    memset(&(info[i]), 0, sizeof(info[i]));
-    infov[i] = &(info[i]);
-    info[i].thread_func = pi->wf;
-    info[i].passdata[0] = pi->passdata[0];
-    info[i].passdata[1] = pi->passdata[1];
-    info[i].gen = rgen_dup(pi->gen0);
-    info[i].seed = (i + 73) * 117;
-    info[i].end_type = end_type;
+    struct forker_worker_info * const wi = wis[i];
+    wi->thread_func = pi->wf;
+    wi->passdata[0] = pi->passdata[0];
+    wi->passdata[1] = pi->passdata[1];
+    wi->gen = rgen_dup(pi->gen0);
+    wi->seed = (i + 73) * 117;
+    wi->end_type = end_type;
     if (end_type == FORKER_END_COUNT) // else: endtime will be set later
-      info[i].end_magic = magic;
-    info[i].worker_id = i;
-    info[i].conc = cc;
+      wi->end_magic = magic;
+    wi->worker_id = i;
+    wi->conc = cc;
 
     // user args
-    info[i].argc = nr_wargs;
-    info[i].argv = argv + PASS_NR_ARGS;
+    wi->argc = nr_wargs;
+    wi->argv = argv + PASS_NR_ARGS;
 
-    info[i].vctr = vctr_create(pi->vctr_size);
-    if (papi_info) {
-      info[i].papi_info = papi_info;
-      info[i].papi_vctr = vctr_create(papi_info->nr);
-    }
+    wi->vctr = vctr_create(pi->vctr_size + forker_papi_nr);
+    wi->papi_vctr_base = pi->vctr_size;
 
-    if (rgen_opt != FORKER_GEN_OPT_SYNC) {
-      const bool rconv = rgen_async_convert(info[i].gen, cores[i % nr_cores] + async_shift);
+    if (rgen_opt != FORKER_GEN_SYNC) {
+      const bool rconv = rgen_async_convert(wi->gen, cores[i % nr_cores] + async_shift);
       (void)rconv;
       debug_assert(rconv);
     }
-    info[i].rgen_next = (rgen_opt == FORKER_GEN_OPT_NOWAIT) ? info[i].gen->next_nowait : info[i].gen->next_wait;
+    wi->rgen_next = (rgen_opt == FORKER_GEN_NOWAIT) ? wi->gen->next_nowait : wi->gen->next_wait;
   }
 
   bool done = false;
+  struct vctr * const va = vctr_create(pi->vctr_size + forker_papi_nr);
   const u64 t0 = time_nsec();
   // until: repeat times, or done determined by damp
   for (u32 r = 0; repeat ? (r < repeat) : (done == false); r++) {
     // prepare
     const u64 dt1 = time_diff_nsec(t0);
     for (u32 i = 0; i < cc; i++) {
-      vctr_reset(info[i].vctr);
-      if (info[i].papi_vctr)
-        vctr_reset(info[i].papi_vctr);
-      rgen_async_wait_all(info[i].gen);
+      vctr_reset(wis[i]->vctr);
+      rgen_async_wait_all(wis[i]->gen);
     }
 
     // set end-time
     if (end_type == FORKER_END_TIME) {
       const u64 end_time = time_nsec() + (1000000000lu * magic);
       for (u32 i = 0; i < cc; i++)
-        info[i].end_magic = end_time;
+        wis[i]->end_magic = end_time;
     }
 
     const long rs0 = process_get_rss();
 
     debug_perf_switch();
-    const u64 dt = thread_fork_join(cc, forker_thread_func, true, (void **)infov);
+#ifdef FORKER_PAPI
+    const u64 dt = thread_fork_join(cc, forker_papi_thread_func, true, (void **)wis);
+#else
+    const u64 dt = thread_fork_join(cc, pi->wf, true, (void **)wis);
+#endif
     debug_perf_switch();
 
     const long rs1 = process_get_rss();
     fprintf(stderr, "rss_kb %+ld ", rs1 - rs0);
 
-    struct vctr * const va = vctr_create(pi->vctr_size);
+    vctr_reset(va);
     for (u64 i = 0; i < cc; i++)
-      vctr_merge(va, infov[i]->vctr);
-    done = pi->af(va, dt, damp, out);
-    vctr_destroy(va);
-
-    forker_papi_report(papi_info, infov, cc, stderr);
+      vctr_merge(va, wis[i]->vctr);
+    done = pi->af(dt, va, damp, out);
 
     // stderr messages
-    fprintf(stderr, " try %u %.2lf %.2lf ",
-        r, ((double)dt1) * 1e-9, ((double)dt) * 1e-9);
+    fprintf(stderr, " try %u %.2lf %.2lf ", r, ((double)dt1) * 1e-9, ((double)dt) * 1e-9);
+#ifdef FORKER_PAPI
+    forker_papi_print(stderr, va, pi->vctr_size);
+#endif
     forker_pass_print(stderr, pref, PASS_NR_ARGS + nr_wargs, argv, out);
   }
 
   // clean up
+  vctr_destroy(va);
   damp_destroy(damp);
-  if (papi_info)
-    free(papi_info);
   for (u64 i = 0; i < cc; i++) {
-    rgen_destroy(info[i].gen);
-    vctr_destroy(info[i].vctr);
-    if (info[i].papi_vctr)
-      vctr_destroy(info[i].papi_vctr);
+    rgen_destroy(wis[i]->gen);
+    vctr_destroy(wis[i]->vctr);
   }
+  free(wis);
 
   // done messages
   forker_pass_print(stdout, pref, PASS_NR_ARGS + nr_wargs, argv, out);
   return PASS_NR_ARGS + nr_wargs;
 #undef PASS_NR_ARGS
-#undef FORKER_GEN_OPT_SYNC
-#undef FORKER_GEN_OPT_WAIT
-#undef FORKER_GEN_OPT_NOWAIT
+#undef FORKER_GEN_SYNC
+#undef FORKER_GEN_NOWAIT
 }
 
   int
@@ -4169,8 +4082,10 @@ forker_passes(int argc, char ** argv, char ** const pref0,
     while ((argc > 0) && (strcmp(argv[0], "pass") == 0)) {
       pi->gen0 = gen;
       const int n3 = forker_pass(argc, argv, pref, pi, nr_wargs0);
-      if (n3 < 0)
+      if (n3 < 0) {
+        rgen_destroy(gen);
         return n3;
+      }
 
       argc -= n3;
       argv += n3;
@@ -4192,9 +4107,12 @@ forker_passes_message(void)
   fprintf(stderr, "%s " TERMCLR(31) "magic-type: 0:time, 1:count" TERMCLR(0) "\n", __func__);
   fprintf(stderr, "%s repeat: 0:auto\n", __func__);
   fprintf(stderr, "%s " TERMCLR(34) "rgen-opt: 0:sync, 1:wait, 2:nowait" TERMCLR(0) "\n", __func__);
-  fprintf(stderr, "Compile with env FORKER_PAPI=y to enable papi (don't use with perf)\n");
-  fprintf(stderr, "Run with env FORKER_PAPI_EVENTS=e1,e2,... to specify events\n");
-  fprintf(stderr, "Run with env FORKER_ASYNC_SHIFT=s (?=1) to bind async-workers at core x+s\n");
+#ifdef FORKER_PAPI
+  fprintf(stderr, "Run with FORKER_PAPI_EVENTS=e1,e2,... to use papi. Run papi_avail for available events.\n");
+#else
+  fprintf(stderr, "Compile with FORKER_PAPI=y to enable papi. Don't use papi and perf at the same time.\n");
+#endif
+  fprintf(stderr, "Run with env FORKER_ASYNC_SHIFT=s (default=1) to bind async-workers at core x+s\n");
 }
 
   bool
