@@ -116,6 +116,13 @@ For example:
     }
     // perform index operations with ref
 
+A common scenario of dead-locking is when acquiring locks while holding a wormhole reference, since `lock()` functions will block-wait and the calling thread won't be able to update the quiescent state. It is recommanded to always use `trylock()` in a loop and keep updating the qstate:
+
+    while (pthread_mutex_trylock(&some_lock) == EBUSY) {
+        wormhole_refresh_qstate(ref);
+    }
+
+
 ### The thread-unsafe API
 A set of *thread-unsafe* functions are also provided. See the functions with _prefix_ `whunsafe`.
 The thread-unsafe functions don't use the reference (_wormref_).
