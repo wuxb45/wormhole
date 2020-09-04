@@ -78,7 +78,7 @@ The Wormhole functions are listed near the bottom of wh.h (see the `wormhole_*` 
 `demo1.c` and `concbench.c` are examples of how to use a Wormhole index.
 There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
 * `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimal complexity in your code, you should use `whsafe`.
-* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for deadlock avoidance.
+* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for deadlock prevention.
 * `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform any concurrency control. It works correctly only in multi-reader or single-writer environments.
 
 The functions of each API can be found near the end of `wh.c` (search `kvmap_api_whsafe`, `kvmap_api_wormhole`, and `kvmap_api_whunsafe`).
