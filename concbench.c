@@ -56,7 +56,7 @@ kv_probe_worker(struct wormhole * const wh)
 
       // do probe
       // customize your benchmark: do a mix of wh operations with switch-cases
-      const struct kref kref = kv_ref(key);
+      const struct kref kref = kv_kref(key);
       if (wormhole_probe(ref, &kref))
         succ++;
     }

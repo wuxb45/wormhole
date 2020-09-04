@@ -28,8 +28,16 @@ typedef atomic_int_least16_t    as16;
 typedef atomic_int_least32_t    as32;
 typedef atomic_int_least64_t    as64;
 
+// shorten long names
+#define MO_RELAXED memory_order_relaxed
+#define MO_CONSUME memory_order_consume
+#define MO_ACQUIRE memory_order_acquire
+#define MO_RELEASE memory_order_release
+#define MO_ACQ_REL memory_order_acq_rel
+#define MO_SEQ_CST memory_order_seq_cst
+
 #if defined(__x86_64__)
 typedef __m128i m128;
 #elif defined(__aarch64__)
-typedef uint16x8_t m128;
+typedef uint8x16_t m128;
 #endif

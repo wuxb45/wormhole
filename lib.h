@@ -133,9 +133,6 @@ debug_backtrace(void);
   extern void
 watch_u64_usr1(u64 * const ptr);
 
-  extern void
-debug_wait_gdb(void);
-
 #ifndef NDEBUG
   extern void
 debug_assert(const bool v);
@@ -172,6 +169,12 @@ malloc_2d(const size_t nr, const size_t size);
   extern void **
 calloc_2d(const size_t nr, const size_t size);
 
+  extern void
+pages_unmap(void * const ptr, const size_t size);
+
+  extern void
+pages_lock(void * const ptr, const size_t size);
+
 /* hugepages */
 // force posix allocators: -DVALGRIND_MEMCHECK
   extern void *
@@ -185,9 +188,6 @@ pages_alloc_1gb(const size_t nr_1gb);
 
   extern void *
 pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out);
-
-  extern void
-pages_unmap(void * const ptr, const size_t size);
 // }}} mm
 
 // process/thread {{{
@@ -204,13 +204,16 @@ process_get_rss(void);
 process_affinity_count(void);
 
   extern u32
-process_affinity_list(const u32 max, u32 * const cores);
+process_getaffinity_list(const u32 max, u32 * const cores);
 
-  extern u64
-process_cpu_time_usec(void);
+  extern void
+thread_setaffinity_list(const u32 nr, const u32 * const list);
 
   extern void
 thread_pin(const u32 cpu);
+
+  extern u64
+process_cpu_time_usec(void);
 
 // if args == true, argx is void **
 // if args == false, argx is void *
@@ -223,7 +226,7 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 
 // locking {{{
 typedef union {
-  u64 opaque;
+  u32 opaque;
 } spinlock;
 
   extern void
@@ -234,9 +237,6 @@ spinlock_lock(spinlock * const lock);
 
   extern bool
 spinlock_trylock(spinlock * const lock);
-
-  extern bool
-spinlock_trylock_nr(spinlock * const lock, u16 nr);
 
   extern void
 spinlock_unlock(spinlock * const lock);
@@ -250,6 +250,10 @@ rwlock_init(rwlock * const lock);
 
   extern bool
 rwlock_trylock_read(rwlock * const lock);
+
+// low-priority reader-lock; use with trylock_write_hp
+  extern bool
+rwlock_trylock_read_lp(rwlock * const lock);
 
   extern bool
 rwlock_trylock_read_nr(rwlock * const lock, u16 nr);
@@ -268,6 +272,16 @@ rwlock_trylock_write_nr(rwlock * const lock, u16 nr);
 
   extern void
 rwlock_lock_write(rwlock * const lock);
+
+// writer has higher priority; new readers are blocked
+  extern bool
+rwlock_trylock_write_hp(rwlock * const lock);
+
+  extern bool
+rwlock_trylock_write_hp_nr(rwlock * const lock, u16 nr);
+
+  extern void
+rwlock_lock_write_hp(rwlock * const lock);
 
   extern void
 rwlock_unlock_write(rwlock * const lock);
@@ -365,16 +379,16 @@ bits_reverse_u32(const u32 v);
 bits_reverse_u64(const u64 v);
 
   extern u64
-bits_rotl_u64(const u64 v, const u64 n);
+bits_rotl_u64(const u64 v, const u8 n);
 
   extern u64
-bits_rotr_u64(const u64 v, const u64 n);
+bits_rotr_u64(const u64 v, const u8 n);
 
   extern u32
-bits_rotl_u32(const u32 v, const u64 n);
+bits_rotl_u32(const u32 v, const u8 n);
 
   extern u32
-bits_rotr_u32(const u32 v, const u64 n);
+bits_rotr_u32(const u32 v, const u8 n);
 
   extern u64
 bits_p2_up_u64(const u64 v);
@@ -384,6 +398,9 @@ bits_p2_up_u32(const u32 v);
 
   extern u64
 bits_p2_down_u64(const u64 v);
+
+  extern u32
+bits_p2_down_u32(const u32 v);
 
   extern u64
 bits_round_up(const u64 v, const u8 power);
@@ -398,7 +415,10 @@ bits_round_down(const u64 v, const u8 power);
 bits_round_down_a(const u64 v, const u64 a);
 
   extern u32
-vi128_estimate(const u64 v);
+vi128_estimate_u32(const u32 v);
+
+  extern u32
+vi128_estimate_u64(const u64 v);
 
   extern u8 *
 vi128_encode_u64(u8 * dst, u64 v);
@@ -487,6 +507,9 @@ slab_free_unsafe(struct slab * const slab, void * const ptr);
   extern void
 slab_free_safe(struct slab * const slab, void * const ptr);
 
+  extern void
+slab_free_all(struct slab * const slab);
+
   extern u64
 slab_get_nalloc(struct slab * const slab);
 
@@ -498,6 +521,9 @@ slab_destroy(struct slab * const slab);
 // }}}  slab
 
 // qsort {{{
+  extern int
+compare_u16(const void * const p1, const void * const p2);
+
   extern void
 qsort_u16(u16 * const array, const size_t nr);
 
@@ -506,6 +532,9 @@ bsearch_u16(const u16 v, const u16 * const array, const size_t nr);
 
   extern void
 shuffle_u16(u16 * const array, const u64 nr);
+
+  extern int
+compare_u32(const void * const p1, const void * const p2);
 
   extern void
 qsort_u32(u32 * const array, const size_t nr);
@@ -516,6 +545,9 @@ bsearch_u32(const u32 v, const u32 * const array, const size_t nr);
   extern void
 shuffle_u32(u32 * const array, const u64 nr);
 
+  extern int
+compare_u64(const void * const p1, const void * const p2);
+
   extern void
 qsort_u64(u64 * const array, const size_t nr);
 
@@ -524,6 +556,9 @@ bsearch_u64(const u64 v, const u64 * const array, const size_t nr);
 
   extern void
 shuffle_u64(u64 * const array, const u64 nr);
+
+  extern int
+compare_double(const void * const p1, const void * const p2);
 
   extern void
 qsort_double(double * const array, const size_t nr);
@@ -570,21 +605,22 @@ xlog_iter_next(struct xlog_iter * const iter, void * const out);
 // }}} ulog/dlog
 
 // string {{{
+// XXX strdec_ and strhex_ functions does not append the trailing '\0' to the output string
 // size of out should be >= 10
   extern void
-str10_u32(void * const out, const u32 v);
+strdec_32(void * const out, const u32 v);
 
 // size of out should be >= 20
   extern void
-str10_u64(void * const out, const u64 v);
+strdec_64(void * const out, const u64 v);
 
 // size of out should be >= 8
   extern void
-str16_u32(void * const out, const u32 v);
+strhex_32(void * const out, const u32 v);
 
 // size of out should be >= 16
   extern void
-str16_u64(void * const out, const u64 v);
+strhex_64(void * const out, const u64 v);
 
   extern u64
 a2u64(const void * const str);
@@ -611,6 +647,9 @@ damp_create(const u64 cap, const double dshort, const double dlong);
 
   extern double
 damp_avg(const struct damp * const d);
+
+  extern double
+damp_ravg(const struct damp * const d);
 
   extern double
 damp_min(const struct damp * const d);
@@ -696,6 +735,8 @@ extern struct rgen * rgen_new_decu(const u64 min, const u64 max);
 extern struct rgen * rgen_new_zipfian(const u64 min, const u64 max);
 extern struct rgen * rgen_new_xzipfian(const u64 min, const u64 max);
 extern struct rgen * rgen_new_unizipf(const u64 min, const u64 max, const u64 ufactor);
+extern struct rgen * rgen_new_zipfuni(const u64 min, const u64 max, const u64 ufactor);
+extern struct rgen * rgen_new_latest(const u64 zipf_range);
 extern struct rgen * rgen_new_uniform(const u64 min, const u64 max);
 extern struct rgen * rgen_new_trace32(const char * const filename, const u64 bufsize);
 
@@ -706,10 +747,14 @@ rgen_min(struct rgen * const gen);
 rgen_max(struct rgen * const gen);
 
   extern u64
-rgen_next_wait(struct rgen * const gen);
+rgen_next(struct rgen * const gen);
 
+// same to next() for regular gen; different only in async rgen
   extern u64
 rgen_next_nowait(struct rgen * const gen);
+
+  extern u64
+rgen_next_write(struct rgen * const gen);
 
   extern void
 rgen_destroy(struct rgen * const gen);
@@ -720,17 +765,20 @@ rgen_helper_message(void);
   extern int
 rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out);
 
-  extern struct rgen *
-rgen_dup(struct rgen * const gen0);
-
-  extern bool
-rgen_async_convert(struct rgen * const gen0, const u32 cpu);
-
   extern void
 rgen_async_wait(struct rgen * const gen);
 
   extern void
 rgen_async_wait_all(struct rgen * const gen);
+
+  extern struct rgen *
+rgen_fork(struct rgen * const gen0);
+
+  extern void
+rgen_join(struct rgen * const gen);
+
+  extern struct rgen *
+rgen_async_create(struct rgen * const gen0, const u32 cpu);
 // }}} rgen
 
 // multi-rcu {{{
@@ -774,18 +822,30 @@ rcu_update(struct rcu * const rcu, void * const ptr);
 
 // qsbr {{{
 struct qsbr;
-
-  extern void
-qsbr_init(struct qsbr * const q);
+struct qsbr_ref {
+#ifdef QSBR_DEBUG
+  u64 debug[16];
+#endif
+  u64 opaque[3];
+};
 
   extern struct qsbr *
 qsbr_create(void);
 
   extern bool
-qsbr_register(struct qsbr * const q, volatile u64 * const ptr);
+qsbr_register(struct qsbr * const q, struct qsbr_ref * const qref);
 
   extern void
-qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr);
+qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref);
+
+  extern void
+qsbr_update(struct qsbr_ref * const qref, const u64 v);
+
+  extern void
+qsbr_park(struct qsbr_ref * const qref);
+
+  extern void
+qsbr_resume(struct qsbr_ref * const qref);
 
   extern void
 qsbr_wait(struct qsbr * const q, const u64 target);
@@ -842,16 +902,18 @@ struct pass_info {
 struct forker_worker_info {
   struct rgen * gen;
   rgen_next_func rgen_next;
+  rgen_next_func rgen_next_write; // identical to rgen_next except for sync-latest
   void * passdata[2]; // if not testing kv
   void * priv;
   u32 end_type;
   u32 padding;
   u64 end_magic;
   struct vctr * vctr;
+
   u64 worker_id; // <= conc
+  struct rgen * gen_back;
   u32 conc; // number of threads
-  // user args
-  int argc;
+  int argc;// user args
   char ** argv;
   u64 seed;
   void * (*thread_func)(void *);

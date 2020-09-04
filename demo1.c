@@ -50,7 +50,7 @@ wh_get(struct wormref * const ref, FILE * input)
   rewind(input);
   u64 hit = 0;
   while (fgets(__buf, __size, input)) {
-    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    kref_ref_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
     if (wormhole_get(ref, &__kref, __out))
       hit++;
   }
@@ -63,7 +63,7 @@ wh_probe(struct wormref * const ref, FILE * input)
   rewind(input);
   u64 hit = 0;
   while (fgets(__buf, __size, input)) {
-    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    kref_ref_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
     if (wormhole_probe(ref, &__kref))
       hit++;
   }
@@ -86,7 +86,7 @@ wh_iter(struct wormref * const ref, FILE * input)
   do {
     if (fgets(__buf, __size, input) == NULL)
       break;
-    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    kref_ref_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
     wormhole_iter_seek(iter, &__kref);
     for (u64 i = 0; i < 100; i++) {
       if (wormhole_iter_next(iter, tmp1))
@@ -109,7 +109,7 @@ wh_del(struct wormref * const ref, FILE * input)
   rewind(input);
   u64 hit = 0;
   while (fgets(__buf, __size, input)) {
-    kref_refill_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
+    kref_ref_hash32(&__kref, (const u8 *)__buf, strlen(__buf));
     if (wormhole_del(ref, &__kref))
       hit++;
   }

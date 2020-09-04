@@ -125,14 +125,14 @@ cpu_pause(void)
   inline void
 cpu_mfence(void)
 {
-  atomic_thread_fence(memory_order_seq_cst);
+  atomic_thread_fence(MO_SEQ_CST);
 }
 
 // compiler fence
   inline void
 cpu_cfence(void)
 {
-  atomic_thread_fence(memory_order_acq_rel);
+  atomic_thread_fence(MO_ACQ_REL);
 }
 
   inline void
@@ -204,16 +204,6 @@ debug_break(void)
   usleep(100);
 }
 
-  void
-debug_backtrace(void)
-{
-  void *array[100];
-  const int size = backtrace(array, 100);
-  dprintf(2, "Backtrace (%d):\n", size);
-  // skip this call
-  backtrace_symbols_fd(array + 1, size, 2);
-}
-
 static u64 * debug_watch_u64 = NULL;
 
   static void
@@ -239,26 +229,39 @@ watch_u64_usr1(u64 * const ptr)
   }
 }
 
-  void
+  static void
 debug_wait_gdb(void)
 {
-  debug_backtrace();
-  volatile bool v = true;
+  void *array[64];
+  const int size = backtrace(array, 64);
+  dprintf(2, "Backtrace (%d):\n", size);
+  backtrace_symbols_fd(array + 1, size, 2);
 
-  char timestamp[64];
-  time_stamp(timestamp, 64);
-  char threadname[64] = {};
-  thread_get_name(pthread_self(), threadname, 64);
-  char hostname[64];
-  gethostname(hostname, 64);
+  abool v = true;
 
-  const char * const pattern = "[Waiting GDB] %s %s @ %s\n"
-    "    Attach me:   " TERMCLR(31) "sudo -Hi gdb -p %d" TERMCLR(0) "\n";
-  fprintf(stderr, pattern, timestamp, threadname, hostname, getpid());
-  fflush(stderr);
+  char timestamp[32];
+  time_stamp(timestamp, 32);
+  char threadname[32] = {};
+  thread_get_name(pthread_self(), threadname, 32);
+  strcat(threadname, "(!!)");
+  thread_set_name(pthread_self(), threadname);
+  char hostname[32];
+  gethostname(hostname, 32);
+
+  const char * const pattern = "[Waiting GDB] %1$s %2$s @ %3$s\n"
+    "    Attach me: " TERMCLR(31) "sudo -Hi gdb -p %4$d" TERMCLR(0) "\n";
+  char buf[256];
+  sprintf(buf, pattern, timestamp, threadname, hostname, getpid());
+  write(2, buf, strlen(buf));
+
   // to continue: gdb> set var v = 0
+  // to kill from shell: $ kill %pid; kill -CONT %pid
+
+  // uncomment this line to surrender the shell on error
+  // kill(getpid(), SIGSTOP); // stop burning cpu, once
+
 #pragma nounroll
-  while (v)
+  while (atomic_load_explicit(&v, MO_CONSUME))
     sleep(1);
 }
 
@@ -272,22 +275,27 @@ debug_assert(const bool v)
 #endif
 
 __attribute__((noreturn))
-  void
+  inline void
 debug_die(void)
 {
   debug_wait_gdb();
   exit(0);
 }
 
+#if !defined(NOSIGNAL)
+// signal handler for wait_gdb on fatal errors
   static void
 wait_gdb_handler(const int sig, siginfo_t * const info, void * const context)
 {
   (void)info;
   (void)context;
-  printf("[SIGNAL] %s\n", strsignal(sig));
+  char buf[64] = "[SIGNAL] ";
+  strcat(buf, strsignal(sig));
+  write(2, buf, strlen(buf));
   debug_wait_gdb();
 }
 
+// setup hooks for catching fatal errors
 __attribute__((constructor))
   static void
 debug_init(void)
@@ -308,6 +316,7 @@ debug_init(void)
     }
   }
 }
+#endif // !defined(NOSIGNAL)
 
 __attribute__((destructor))
   static void
@@ -471,6 +480,19 @@ pages_unmap(void * const ptr, const size_t size)
 #endif
 }
 
+  void
+pages_lock(void * const ptr, const size_t size)
+{
+  static bool use_mlock = true;
+  if (use_mlock) {
+    const int ret = mlock(ptr, size);
+    if (ret != 0) {
+      use_mlock = false;
+      fprintf(stderr, "%s: mlock disabled\n", __func__);
+    }
+  }
+}
+
 #ifndef HEAPCHECKING
   static void *
 pages_do_alloc(const size_t size, const int flags)
@@ -481,13 +503,7 @@ pages_do_alloc(const size_t size, const int flags)
   if (p == MAP_FAILED)
     return NULL;
 
-  static bool use_mlock = true;
-  if (use_mlock)
-    if (mlock(p, size) != 0) {
-      use_mlock = false;
-      fprintf(stderr, "%s: mlock disabled\n", __func__);
-    }
-
+  pages_lock(p, size);
   return p;
 }
 
@@ -597,10 +613,11 @@ process_init(void)
         __func__, (size_t)CPU_SETSIZE);
     process_ncpu = CPU_SETSIZE;
   }
+  thread_set_name(pthread_self(), "main");
 }
 
   static inline int
-thread_getaffinity(cpu_set_t * const cpuset)
+thread_getaffinity_set(cpu_set_t * const cpuset)
 {
 #if defined(__linux__)
   return sched_getaffinity(0, sizeof(*cpuset), cpuset);
@@ -610,7 +627,7 @@ thread_getaffinity(cpu_set_t * const cpuset)
 }
 
   static inline int
-thread_setaffinity(const cpu_set_t * const cpuset)
+thread_setaffinity_set(const cpu_set_t * const cpuset)
 {
 #if defined(__linux__)
   return sched_setaffinity(0, sizeof(*cpuset), cpuset);
@@ -652,7 +669,7 @@ process_get_rss(void)
 process_affinity_count(void)
 {
   cpu_set_t set;
-  if (thread_getaffinity(&set) != 0)
+  if (thread_getaffinity_set(&set) != 0)
     return process_ncpu;
 
   const u32 nr = (u32)CPU_COUNT(&set);
@@ -660,11 +677,11 @@ process_affinity_count(void)
 }
 
   u32
-process_affinity_list(const u32 max, u32 * const cores)
+process_getaffinity_list(const u32 max, u32 * const cores)
 {
   memset(cores, 0, max * sizeof(cores[0]));
   cpu_set_t set;
-  if (thread_getaffinity(&set) != 0)
+  if (thread_getaffinity_set(&set) != 0)
     return 0;
 
   const u32 nr_affinity = (u32)CPU_COUNT(&set);
@@ -680,14 +697,15 @@ process_affinity_list(const u32 max, u32 * const cores)
   return j;
 }
 
-  u64
-process_cpu_time_usec(void)
+  void
+thread_setaffinity_list(const u32 nr, const u32 * const list)
 {
-  struct rusage rs;
-  getrusage(RUSAGE_SELF, &rs);
-  const u64 usr = (((u64)rs.ru_utime.tv_sec) * 1000000lu) + ((u64)rs.ru_utime.tv_usec);
-  const u64 sys = (((u64)rs.ru_stime.tv_sec) * 1000000lu) + ((u64)rs.ru_stime.tv_usec);
-  return usr + sys;
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (u32 i = 0; i < nr; i++)
+    if (list[i] < process_ncpu)
+      CPU_SET(list[i], &set);
+  thread_setaffinity_set(&set);
 }
 
   void
@@ -696,7 +714,17 @@ thread_pin(const u32 cpu)
   cpu_set_t set;
   CPU_ZERO(&set);
   CPU_SET(cpu % process_ncpu, &set);
-  thread_setaffinity(&set);
+  thread_setaffinity_set(&set);
+}
+
+  u64
+process_cpu_time_usec(void)
+{
+  struct rusage rs;
+  getrusage(RUSAGE_SELF, &rs);
+  const u64 usr = (((u64)rs.ru_utime.tv_sec) * 1000000lu) + ((u64)rs.ru_utime.tv_usec);
+  const u64 sys = (((u64)rs.ru_stime.tv_sec) * 1000000lu) + ((u64)rs.ru_stime.tv_usec);
+  return usr + sys;
 }
 
 struct fork_join_info {
@@ -720,8 +748,8 @@ struct fork_join_info {
 struct fork_join_priv {
   union {
     struct {
-      u64 rank : FORK_JOIN_RANK_BITS;
-      u64 fji : FORK_JOIN_FJI_BITS;
+      u64 rank : FORK_JOIN_RANK_BITS; // 16
+      u64 fji : FORK_JOIN_FJI_BITS; // 48
     };
     void * ptr;
   };
@@ -757,18 +785,19 @@ thread_do_fork_join_worker(void * const ptr)
     CPU_ZERO(&set);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+    //pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE); // Joinable by default
     // fork top-down
     for (u32 i = nchild - 1; i < nchild; i--) {
-      const u32 cr = rank + (1u << i);
+      const u32 cr = rank + (1u << i); // child's rank
       if (cr >= fji->total)
         continue; // should not break
-      const u32 core = fji->cores[cr % fji->ncores];
+      const u32 core = fji->cores[(cr < fji->ncores) ? cr : (cr % fji->ncores)];
       CPU_SET(core, &set);
       pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
       fjp.rank = cr;
       const int r = pthread_create(&tids[i], &attr, thread_do_fork_join_worker, fjp.ptr);
-      if (r) { // fork failed
+      CPU_CLR(core, &set);
+      if (unlikely(r)) { // fork failed
         memset(&tids[0], 0, sizeof(tids[0]) * (i+1));
         u32 nmiss = (1u << (i + 1)) - 1;
         if ((rank + nmiss) >= fji->total)
@@ -776,17 +805,19 @@ thread_do_fork_join_worker(void * const ptr)
         fji->ferr += nmiss;
         break;
       }
-      CPU_CLR(core, &set);
     }
     pthread_attr_destroy(&attr);
   }
 
-  char thname[16];
-  sprintf(thname, "fj_%u", rank);
-  thread_set_name(pthread_self(), thname);
+  char thname0[16];
+  char thname1[16];
+  thread_get_name(pthread_self(), thname0, 16);
+  snprintf(thname1, 16, "%.8s_%u", thname0, rank);
+  thread_set_name(pthread_self(), thname1);
 
   void * const ret = fji->func(fji->args ? fji->argn[rank] : fji->arg1);
 
+  thread_set_name(pthread_self(), thname0);
   // join bottom-up
   for (u32 i = 0; i < nchild; i++) {
     const u32 cr = rank + (1u << i); // child rank
@@ -794,7 +825,7 @@ thread_do_fork_join_worker(void * const ptr)
       break; // safe to break
     if (tids[i]) {
       const int r = pthread_join(tids[i], NULL);
-      if (r) { // error
+      if (unlikely(r)) { // error
         //fprintf(stderr, "pthread_join %u..%u = %d: %s\n", rank, cr, r, strerror(r));
         fji->jerr++;
       }
@@ -806,14 +837,14 @@ thread_do_fork_join_worker(void * const ptr)
   u64
 thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const argx)
 {
-  if (nr > FORK_JOIN_MAX) {
+  if (unlikely(nr > FORK_JOIN_MAX)) {
     fprintf(stderr, "%s reduce nr to %u\n", __func__, FORK_JOIN_MAX);
     nr = FORK_JOIN_MAX;
   }
 
   u32 cores[CPU_SETSIZE];
-  u32 ncores = process_affinity_list(process_ncpu, cores);
-  if (ncores == 0) { // force to use all cores
+  u32 ncores = process_getaffinity_list(process_ncpu, cores);
+  if (unlikely(ncores == 0)) { // force to use all cores
     ncores = process_ncpu;
     for (u32 i = 0; i < process_ncpu; i++)
       cores[i] = i;
@@ -821,7 +852,7 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
   if (nr == 0)
     nr = ncores;
 
-  struct fork_join_info fji;
+  volatile struct fork_join_info fji;
   fji.total = nr;
   fji.cores = cores;
   fji.ncores = ncores;
@@ -834,21 +865,21 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
 
   // save current affinity
   cpu_set_t set0;
-  thread_getaffinity(&set0);
+  thread_getaffinity_set(&set0);
 
   // master thread shares thread0's core
   cpu_set_t set;
   CPU_ZERO(&set);
   CPU_SET(fji.cores[0], &set);
-  thread_setaffinity(&set);
+  thread_setaffinity_set(&set);
 
   const u64 t0 = time_nsec();
   thread_do_fork_join_worker(fjp.ptr);
   const u64 dt = time_diff_nsec(t0);
 
   // restore original affinity
-  thread_setaffinity(&set0);
-  if (fji.ferr || fji.jerr)
+  thread_setaffinity_set(&set0);
+  if (fji.ferr || fji.jerr) // cppcheck-suppress knownConditionTrueFalse
     fprintf(stderr, "%s errors: fork %lu join %lu\n", __func__, fji.ferr, fji.jerr);
   return dt;
 }
@@ -859,7 +890,7 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
   const u32 cpu_id = cpu % process_ncpu;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
-  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+  //pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
   cpu_set_t set;
 
   CPU_ZERO(&set);
@@ -874,13 +905,22 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 // locking {{{
 
 // spinlock {{{
-static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "lock size");
+#if defined(__linux__)
+static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
+#elif defined(__FreeBSD__)
+static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
+#endif
 
   inline void
 spinlock_init(spinlock * const lock)
 {
+#if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_init(p, PTHREAD_PROCESS_PRIVATE);
+#elif defined(__FreeBSD__)
+  au32 * const p = (typeof(p))lock;
+  atomic_store_explicit(p, 0, MO_RELEASE);
+#endif
 }
 
   inline void
@@ -891,41 +931,49 @@ spinlock_lock(spinlock * const lock)
   while (!spinlock_trylock(lock))
     corr_yield();
 #else
+#if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_lock(p); // return value ignored
-#endif
+#elif defined(__FreeBSD__)
+  au32 * const p = (typeof(p))lock;
+  do {
+    if (atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0)
+      return;
+    do {
+      cpu_pause();
+    } while (atomic_load_explicit(p, MO_CONSUME));
+  } while (true);
+#endif // __FreeBSD__
+#endif // CORR
 }
 
   inline bool
 spinlock_trylock(spinlock * const lock)
 {
+#if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   return !pthread_spin_trylock(p);
-}
-
-  inline bool
-spinlock_trylock_nr(spinlock * const lock, u16 nr)
-{
-  pthread_spinlock_t * const p = (typeof(p))lock;
-#pragma nounroll
-  do {
-    if (!pthread_spin_trylock(p))
-      return true;
-    cpu_pause();
-  } while (nr--);
-  return false;
+#elif defined(__FreeBSD__)
+  au32 * const p = (typeof(p))lock;
+  return atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0;
+#endif // __FreeBSD__
 }
 
   inline void
 spinlock_unlock(spinlock * const lock)
 {
+#if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_unlock(p); // return value ignored
+#elif defined(__FreeBSD__)
+  au32 * const p = (typeof(p))lock;
+  atomic_store_explicit(p, 0, MO_RELEASE);
+#endif // __FreeBSD__
 }
 // }}} spinlock
 
 // pthread mutex {{{
-static_assert(sizeof(pthread_mutex_t) <= sizeof(mutex), "lock size");
+static_assert(sizeof(pthread_mutex_t) <= sizeof(mutex), "mutexlock size");
   inline void
 mutex_init(mutex * const lock)
 {
@@ -974,19 +1022,30 @@ static_assert(sizeof(lock_t) <= sizeof(rwlock), "lock size");
 rwlock_init(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  atomic_store(pvar, 0);
+  atomic_store_explicit(pvar, 0, MO_RELEASE);
 }
 
   inline bool
 rwlock_trylock_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  if ((atomic_fetch_add_explicit(pvar, 1, memory_order_acquire) >> RWLOCK_WSHIFT) == 0) {
+  if ((atomic_fetch_add_explicit(pvar, 1, MO_ACQUIRE) >> RWLOCK_WSHIFT) == 0) {
     return true;
   } else {
-    atomic_fetch_sub_explicit(pvar, 1, memory_order_release);
+    atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
     return false;
   }
+}
+
+  inline bool
+rwlock_trylock_read_lp(rwlock * const lock)
+{
+  lock_t * const pvar = (typeof(pvar))lock;
+  if (atomic_load_explicit(pvar, MO_CONSUME) >> RWLOCK_WSHIFT) {
+    cpu_pause();
+    return false;
+  }
+  return rwlock_trylock_read(lock);
 }
 
 // actually nr + 1
@@ -994,17 +1053,17 @@ rwlock_trylock_read(rwlock * const lock)
 rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  if ((atomic_fetch_add_explicit(pvar, 1, memory_order_acquire) >> RWLOCK_WSHIFT) == 0)
+  if ((atomic_fetch_add_explicit(pvar, 1, MO_ACQUIRE) >> RWLOCK_WSHIFT) == 0)
     return true;
 
 #pragma nounroll
   do { // someone already locked; wait for a little while
     cpu_pause();
-    if ((atomic_load_explicit(pvar, memory_order_consume) >> RWLOCK_WSHIFT) == 0)
+    if ((atomic_load_explicit(pvar, MO_CONSUME) >> RWLOCK_WSHIFT) == 0)
       return true;
   } while (nr--);
 
-  atomic_fetch_sub_explicit(pvar, 1, memory_order_release);
+  atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
   return false;
 }
 
@@ -1023,7 +1082,7 @@ rwlock_lock_read(rwlock * const lock)
 #else
       cpu_pause();
 #endif
-    } while (atomic_load_explicit(pvar, memory_order_consume) >> RWLOCK_WSHIFT);
+    } while (atomic_load_explicit(pvar, MO_CONSUME) >> RWLOCK_WSHIFT);
   } while (true);
 }
 
@@ -1031,15 +1090,15 @@ rwlock_lock_read(rwlock * const lock)
 rwlock_unlock_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  atomic_fetch_sub_explicit(pvar, 1, memory_order_release);
+  atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
 }
 
   inline bool
 rwlock_trylock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  lock_v v0 = atomic_load_explicit(pvar, memory_order_consume);
-  return (v0 == 0) && atomic_compare_exchange_weak_explicit(pvar, &v0, RWLOCK_WBIT, memory_order_acquire, memory_order_relaxed);
+  lock_v v0 = atomic_load_explicit(pvar, MO_CONSUME);
+  return (v0 == 0) && atomic_compare_exchange_weak_explicit(pvar, &v0, RWLOCK_WBIT, MO_ACQUIRE, MO_RELAXED);
 }
 
 // actually nr + 1
@@ -1070,15 +1129,66 @@ rwlock_lock_write(rwlock * const lock)
 #else
       cpu_pause();
 #endif
-    } while (atomic_load_explicit(pvar, memory_order_consume));
+    } while (atomic_load_explicit(pvar, MO_CONSUME));
   } while (true);
+}
+
+  inline bool
+rwlock_trylock_write_hp(rwlock * const lock)
+{
+  lock_t * const pvar = (typeof(pvar))lock;
+  lock_v v0 = atomic_load_explicit(pvar, MO_CONSUME);
+  if (v0 >> RWLOCK_WSHIFT)
+    return false;
+
+  if (atomic_compare_exchange_weak_explicit(pvar, &v0, v0|RWLOCK_WBIT, MO_ACQUIRE, MO_RELAXED)) {
+    // WBIT successfully marked; must wait for readers to leave
+    if (v0) { // saw active readers
+#pragma nounroll
+      while (atomic_load_explicit(pvar, MO_CONSUME) != RWLOCK_WBIT) {
+#if defined(CORR)
+        corr_yield();
+#else
+        cpu_pause();
+#endif
+      }
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
+  inline bool
+rwlock_trylock_write_hp_nr(rwlock * const lock, u16 nr)
+{
+#pragma nounroll
+  do {
+    if (rwlock_trylock_write_hp(lock))
+      return true;
+    cpu_pause();
+  } while (nr--);
+  return false;
+}
+
+  inline void
+rwlock_lock_write_hp(rwlock * const lock)
+{
+#pragma nounroll
+  while (!rwlock_trylock_write_hp(lock)) {
+#if defined(CORR)
+    corr_yield();
+#else
+    cpu_pause();
+#endif
+  }
 }
 
   inline void
 rwlock_unlock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  atomic_fetch_sub_explicit(pvar, RWLOCK_WBIT, memory_order_release);
+  atomic_fetch_sub_explicit(pvar, RWLOCK_WBIT, MO_RELEASE);
 }
 
   inline void
@@ -1086,7 +1196,7 @@ rwlock_write_to_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   // +R -W
-  atomic_fetch_add_explicit(pvar, ((lock_v)1) - RWLOCK_WBIT, memory_order_acq_rel);
+  atomic_fetch_add_explicit(pvar, ((lock_v)1) - RWLOCK_WBIT, MO_ACQ_REL);
 }
 
 #undef RWLOCK_WSHIFT
@@ -1454,30 +1564,30 @@ bits_reverse_u64(const u64 v)
 }
 
   inline u64
-bits_rotl_u64(const u64 v, const u64 n)
+bits_rotl_u64(const u64 v, const u8 n)
 {
-  const u64 sh = n & 0x3f;
+  const u8 sh = n & 0x3f;
   return (v << sh) | (v >> (64 - sh));
 }
 
   inline u64
-bits_rotr_u64(const u64 v, const u64 n)
+bits_rotr_u64(const u64 v, const u8 n)
 {
-  const u64 sh = n & 0x3f;
+  const u8 sh = n & 0x3f;
   return (v >> sh) | (v << (64 - sh));
 }
 
   inline u32
-bits_rotl_u32(const u32 v, const u64 n)
+bits_rotl_u32(const u32 v, const u8 n)
 {
-  const u64 sh = n & 0x1f;
+  const u8 sh = n & 0x1f;
   return (v << sh) | (v >> (32 - sh));
 }
 
   inline u32
-bits_rotr_u32(const u32 v, const u64 n)
+bits_rotr_u32(const u32 v, const u8 n)
 {
-  const u64 sh = n & 0x1f;
+  const u8 sh = n & 0x1f;
   return (v >> sh) | (v << (32 - sh));
 }
 
@@ -1498,7 +1608,13 @@ bits_p2_up_u32(const u32 v)
   inline u64
 bits_p2_down_u64(const u64 v)
 {
-  return v ? (1lu << (63lu - (u64)__builtin_clzl(v))) : v;
+  return v ? (1lu << (63 - __builtin_clzl(v))) : v;
+}
+
+  inline u32
+bits_p2_down_u32(const u32 v)
+{
+  return v ? (1u << (31 - __builtin_clz(v))) : v;
 }
 
   inline u64
@@ -1526,7 +1642,21 @@ bits_round_down_a(const u64 v, const u64 a)
 }
 
   inline u32
-vi128_estimate(const u64 v)
+vi128_estimate_u32(const u32 v)
+{
+  static const u8 t[] = {5,5,5,5,4,4,4,4,4,4,4,
+    3,3,3,3,3,3,3,2,2,2,2,2,2,2,1,1,1,1,1,1,1};
+  return v ? t[__builtin_clz(v)] : 1;
+  // 0 -> 1        clz
+  // 1 to 7 -> 1   31 to 25
+  // 8 to 14 -> 2  24 to 18
+  // 15 to 21 -> 3 17 to 11
+  // 22 to 28 -> 4 10 to 4
+  // 29 to 32 -> 5  3 to 0
+}
+
+  inline u32
+vi128_estimate_u64(const u64 v)
 {
   return v ? ((70u - ((u32)__builtin_clzl(v))) / 7u) : 1;
 }
@@ -1536,7 +1666,7 @@ vi128_estimate(const u64 v)
 vi128_encode_u64(u8 * dst, u64 v)
 {
   while (v >> 7) {
-    *(dst++) = (((u8)v) & 0x7f) | 0x80;
+    *(dst++) = (u8)(v | 0x80);
     v >>= 7; // from low bits to high bits
   }
   *(dst++) = (u8)v;
@@ -1546,11 +1676,36 @@ vi128_encode_u64(u8 * dst, u64 v)
   u8 *
 vi128_encode_u32(u8 * dst, u32 v)
 {
-  while (v >> 7) {
-    *(dst++) = (((u8)v) & 0x7f) | 0x80;
-    v >>= 7; // from low bits to high bits
+  //while (v >> 7) {
+  //  *(dst++) = (((u8)v) & 0x7f) | 0x80;
+  //  v >>= 7; // from low bits to high bits
+  //}
+  //*(dst++) = (u8)v;
+
+  switch (vi128_estimate_u32(v)) {
+  case 5:
+    *(dst++) = (u8)(v | 0x80);
+    v >>= 7;
+    __attribute__((fallthrough));
+  case 4:
+    *(dst++) = (u8)(v | 0x80);
+    v >>= 7;
+    __attribute__((fallthrough));
+  case 3:
+    *(dst++) = (u8)(v | 0x80);
+    v >>= 7;
+    __attribute__((fallthrough));
+  case 2:
+    *(dst++) = (u8)(v | 0x80);
+    v >>= 7;
+    __attribute__((fallthrough));
+  case 1:
+    *(dst++) = (u8)v;
+    break;
+  default:
+    debug_die();
+    break;
   }
-  *(dst++) = (u8)v;
   return dst;
 }
 
@@ -1567,6 +1722,7 @@ vi128_decode_u64(const u8 * src, u64 * const out)
       return src;
     }
   }
+  *out = 0;
   return NULL; // invalid
 }
 
@@ -1582,6 +1738,7 @@ vi128_decode_u32(const u8 * src, u32 * const out)
       return src;
     }
   }
+  *out = 0;
   return NULL; // invalid
 }
 // }}} bits
@@ -1688,7 +1845,7 @@ bf_create(const u64 bpk, const u64 nkeys)
   static inline u64
 bf_inc(const u64 hash)
 {
-  return bits_rotl_u64(hash, 31);
+  return bits_rotl_u64(hash, 17);
 }
 
   void
@@ -1738,19 +1895,20 @@ struct slab_object {
 
 struct slab {
   //struct slab_object * obj_head;
-  union {
-    au64 amagic; // hi 48: ptr, lo 16: seq
-    volatile u64 magic; // unsafe
-  };
-  u64 obj_size; // const: aligned size of each object
-  u64 blk_size; // const: size of each memory block
-  u64 objs_per_slab; // const: number of objects in a slab
+  au64 magic; // hi 48: ptr, lo 16: seq
+  u64 padding1[7];
 
+  // 2nd line
   struct slab_object * blk_head; // list of all blocks
   u64 nalloc; // UNSAFE!
   u64 nready; // UNSAFE!
+  u64 obj_size; // const: aligned size of each object
+  u64 blk_size; // const: size of each memory block
+  u64 objs_per_slab; // const: number of objects in a slab
+  u64 obj0_offset; // offset of the first object in a block
   u64 padding;
-  // 2nd line
+
+  // 3rd line
   mutex lock;
 };
 
@@ -1759,10 +1917,10 @@ slab_push_safe(struct slab * const slab, struct slab_object * const obj_head,
     struct slab_object * const obj_last)
 {
   do {
-    u64 m0 = slab->magic;
+    u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);;
     obj_last->next = (void *)(m0 >> 16);
     const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
-    if (atomic_compare_exchange_weak(&slab->amagic, &m0, m1))
+    if (atomic_compare_exchange_weak(&slab->magic, &m0, m1))
       return;
   } while (true);
 }
@@ -1771,21 +1929,22 @@ slab_push_safe(struct slab * const slab, struct slab_object * const obj_head,
 slab_push_unsafe(struct slab * const slab, struct slab_object * const obj_head,
     struct slab_object * const obj_last)
 {
-  const u64 m0 = slab->magic;
+  const u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
   obj_last->next = (void *)(m0 >> 16);
-  slab->magic = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
+  const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
+  atomic_store_explicit(&slab->magic, m1, MO_RELAXED);
 }
 
   static void *
 slab_pop_safe(struct slab * const slab)
 {
   do {
-    u64 m0 = slab->magic;
+    u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
     struct slab_object * const ret = (typeof(ret))(m0 >> 16);
     if (ret == NULL)
       return ret;
     const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
-    if (atomic_compare_exchange_weak(&slab->amagic, &m0, m1))
+    if (atomic_compare_exchange_weak_explicit(&slab->magic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
       return ret;
   } while (true);
 }
@@ -1793,27 +1952,22 @@ slab_pop_safe(struct slab * const slab)
   static void *
 slab_pop_unsafe(struct slab * const slab)
 {
-  const u64 m0 = slab->magic;
+  const u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
   struct slab_object * const ret = (typeof(ret))(m0 >> 16);
   if (ret == NULL)
     return ret;
-  slab->magic = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
+  const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
+  atomic_store_explicit(&slab->magic, m1, MO_RELAXED);
   return (void *)ret;
 }
 
-  static bool
-slab_expand(struct slab * const slab, const bool safe)
+  static void
+slab_add_block(struct slab * const slab, struct slab_object * const blk, const bool safe)
 {
-  size_t blk_size;
-  struct slab_object * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
-  (void)blk_size;
-  if (blk == NULL)
-    return false;
-  debug_assert(blk_size == slab->blk_size);
   blk->next = slab->blk_head;
   slab->blk_head = blk;
 
-  u8 * const base = ((u8 *)blk) + SLAB_OBJ0_OFFSET;
+  u8 * const base = ((u8 *)blk) + slab->obj0_offset;
   struct slab_object * iter = (typeof(iter))base; // [0]
   for (u64 i = 1; i < slab->objs_per_slab; i++) {
     struct slab_object * const next = (typeof(next))(base + (i * slab->obj_size));
@@ -1827,16 +1981,32 @@ slab_expand(struct slab * const slab, const bool safe)
     slab_push_unsafe(slab, (struct slab_object *)base, iter);
     slab->nready += slab->objs_per_slab;
   }
+}
 
+  static bool
+slab_expand(struct slab * const slab, const bool safe)
+{
+  size_t blk_size;
+  struct slab_object * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
+  (void)blk_size;
+  if (blk == NULL)
+    return false;
+
+  slab_add_block(slab, blk, safe);
   return true;
 }
 
   struct slab *
 slab_create(const u64 obj_size, const u64 blk_size)
 {
-  // obj must be 8-byte aligned
+  // obj must be non-zero and 8-byte aligned
   // blk must be at least of page size and power of 2
-  if ((obj_size % 8lu) || (blk_size < 4096lu) || (blk_size & (blk_size - 1)))
+  if ((!obj_size) || (obj_size % 8lu) || (blk_size < 4096lu) || (blk_size & (blk_size - 1)))
+    return NULL;
+
+  // each slab should have at least one object
+  const u64 obj0_offset = (obj_size & (obj_size - 1)) ? SLAB_OBJ0_OFFSET : obj_size;
+  if (obj0_offset >= blk_size || (blk_size - obj0_offset) < obj_size)
     return NULL;
 
   struct slab * const slab = yalloc(sizeof(*slab));
@@ -1844,12 +2014,17 @@ slab_create(const u64 obj_size, const u64 blk_size)
     return NULL;
 
   slab->magic = 0;
-  slab->obj_size = obj_size;
-  slab->blk_size = blk_size;
-  slab->objs_per_slab = (blk_size - SLAB_OBJ0_OFFSET) / obj_size;
   slab->blk_head = NULL;
   slab->nalloc = 0;
   slab->nready = 0;
+
+  // const
+  slab->obj_size = obj_size;
+  slab->blk_size = blk_size;
+  slab->objs_per_slab = (blk_size - obj0_offset) / obj_size;
+  debug_assert(slab->objs_per_slab); // >= 1
+  slab->obj0_offset = obj0_offset;
+
   mutex_init(&(slab->lock));
   return slab;
 }
@@ -1914,6 +2089,22 @@ slab_free_safe(struct slab * const slab, void * const ptr)
 }
 
 // unsafe
+  void
+slab_free_all(struct slab * const slab)
+{
+  struct slab_object * iter = slab->blk_head;
+  slab->magic = 0;
+  slab->blk_head = NULL;
+  slab->nalloc = 0;
+  slab->nready = 0;
+  while (iter) {
+    struct slab_object * const next = iter->next;
+    slab_add_block(slab, iter, false);
+    iter = next;
+  }
+}
+
+// unsafe
   inline u64
 slab_get_nalloc(struct slab * const slab)
 {
@@ -1943,7 +2134,7 @@ slab_destroy(struct slab * const slab)
 // }}} slab
 
 // qsort {{{
-  static int
+  int
 compare_u16(const void * const p1, const void * const p2)
 {
   const u16 v1 = *((const u16 *)p1);
@@ -1975,7 +2166,7 @@ shuffle_u16(u16 * const array, const u64 nr)
   } while (--i);
 }
 
-  static int
+  int
 compare_u32(const void * const p1, const void * const p2)
 {
   const u32 v1 = *((const u32 *)p1);
@@ -2007,7 +2198,7 @@ shuffle_u32(u32 * const array, const u64 nr)
   } while (--i);
 }
 
-  static int
+  int
 compare_u64(const void * const p1, const void * const p2)
 {
   const u64 v1 = *((const u64 *)p1);
@@ -2041,7 +2232,7 @@ shuffle_u64(u64 * const array, const u64 nr)
   } while (--i);
 }
 
-  static int
+  int
 compare_double(const void * const p1, const void * const p2)
 {
   const double v1 = *((const double *)p1);
@@ -2119,71 +2310,119 @@ qsort_double_sample(const double * const array0, const u64 nr, const u64 res, FI
 // }}} qsort
 
 // string {{{
-static u16 str10_table[100];
+static union { u16 v16; u8 v8[2]; } strdec_table[100];
 
 __attribute__((constructor))
   static void
-str10_init(void)
+strdec_init(void)
 {
   for (u8 i = 0; i < 100; i++) {
     const u8 hi = (typeof(hi))('0' + (i / 10));
     const u8 lo = (typeof(lo))('0' + (i % 10));
-    str10_table[i] = (lo << 8) | hi;
+    strdec_table[i].v8[0] = hi;
+    strdec_table[i].v8[1] = lo;
   }
 }
 
 // output 10 bytes
   void
-str10_u32(void * const out, const u32 v)
+strdec_32(void * const out, const u32 v)
 {
   u32 vv = v;
   u16 * const ptr = (typeof(ptr))out;
   for (u64 i = 4; i <= 4; i--) { // x5
-    ptr[i] = str10_table[vv % 100];
+    ptr[i] = strdec_table[vv % 100].v16;
     vv /= 100u;
   }
 }
 
 // output 20 bytes
   void
-str10_u64(void * const out, const u64 v)
+strdec_64(void * const out, const u64 v)
 {
   u64 vv = v;
   u16 * const ptr = (typeof(ptr))out;
   for (u64 i = 9; i <= 9; i--) { // x10
-    ptr[i] = str10_table[vv % 100];
+    ptr[i] = strdec_table[vv % 100].v16;
     vv /= 100;
   }
 }
 
-static u16 str16_table[256];
+#if defined(__x86_64__)
+  static inline m128
+strhex_helper(const u64 v)
+{
+  static const u8 mask1[16] = {15,7,14,6,13,5,12,4,11,3,10,2,9,1,8,0};
+  static const u8 ascii[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
+
+  const m128 tmp = _mm_set_epi64x((s64)(v>>4), (s64)v); // mm want s64
+  const m128 hilo = _mm_and_si128(tmp, _mm_set1_epi8(0xf));
+  const m128 bin = _mm_shuffle_epi8(hilo, _mm_load_si128((void *)mask1));
+  const m128 str = _mm_shuffle_epi8(_mm_load_si128((void *)ascii), bin);
+  return str;
+}
+#elif defined(__aarch64__)
+  static inline m128
+strhex_helper(const u64 v)
+{
+  static const u8 mask1[16] = {15,7,14,6,13,5,12,4,11,3,10,2,9,1,8,0};
+  static const u8 ascii[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
+  u64 v2[2] = {v, v>>4};
+  const m128 tmp = vld1q_u8((u8 *)v2);
+  const m128 hilo = vandq_u8(tmp, vdupq_n_u8(0xf));
+  const m128 bin = vqtbl1q_u8(hilo, vld1q_u8(mask1));
+  const m128 str = vqtbl1q_u8(vld1q_u8(ascii), bin);
+  return str;
+}
+#else
+static u16 strhex_table[256];
 
 __attribute__((constructor))
   static void
-str16_init(void)
+strhex_init(void)
 {
-  const u8 hex[16] = { '0','1','2','3','4','5','6','7','8','9',
-    'a','b','c','d','e','f'};
+  const u8 hex[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
   for (u64 i = 0; i < 256; i++)
-    str16_table[i] = (((u16)hex[i & 0xf]) << 8) | (hex[i>>4]);
+    strhex_table[i] = (((u16)hex[i & 0xf]) << 8) | (hex[i>>4]);
 }
+#endif // __x86_64__
 
 // output 8 bytes
   void
-str16_u32(void * const out, const u32 v)
+strhex_32(void * const out, u32 v)
 {
+#if defined(__x86_64__)
+  const m128 str = strhex_helper((u64)v);
+  _mm_storel_epi64(out, _mm_srli_si128(str, 8));
+#elif defined(__aarch64__)
+  const m128 str = strhex_helper((u64)v);
+  vst1q_lane_u64(out, str, 1);
+#else
   u16 * const ptr = (typeof(ptr))out;
-  for (u64 i = 0; i < 4; i++)
-    ptr[3-i] = str16_table[(v >> (i << 3)) & 0xff];
+  for (u64 i = 0; i < 4; i++) {
+    ptr[3-i] = strhex_table[v & 0xff];
+    v >>= 8;
+  }
+#endif
 }
 
-// output 16 bytes
+// output 16 bytes // buffer must be aligned by 16B
   void
-str16_u64(void * const out, const u64 v)
+strhex_64(void * const out, u64 v)
 {
+#if defined(__x86_64__)
+  const m128 str = strhex_helper(v);
+  _mm_store_si128(out, str);
+#elif defined(__aarch64__)
+  const m128 str = strhex_helper(v);
+  vst1q_u8(out, str);
+#else
   u16 * const ptr = (typeof(ptr))out;
-  for (u64 i = 0; i < 8; i++)
-    ptr[7-i] = str16_table[(v >> (i << 3)) & 0xff];
+  for (u64 i = 0; i < 8; i++) {
+    ptr[7-i] = strhex_table[v & 0xff];
+    v >>= 8;
+  }
+#endif
 }
 
 // string to u64
@@ -2273,6 +2512,7 @@ struct damp {
   u64 cap;
   u64 nr; // <= cap
   u64 nr_added; // +1 every time
+  double sum;
   double dshort;
   double dlong;
   double hist[];
@@ -2285,6 +2525,7 @@ damp_create(const u64 cap, const double dshort, const double dlong)
   d->cap = cap;
   d->nr = 0;
   d->nr_added = 0;
+  d->sum = 0.0;
   d->dshort = dshort;
   d->dlong = dlong;
   return d;
@@ -2292,6 +2533,13 @@ damp_create(const u64 cap, const double dshort, const double dlong)
 
   double
 damp_avg(const struct damp * const d)
+{
+  return d->nr_added ? (d->sum / (double)d->nr_added) : 0.0;
+}
+
+// recent avg
+  double
+damp_ravg(const struct damp * const d)
 {
   double sum = 0.0;
   for (u64 i = 0; i < d->nr; i++)
@@ -2335,6 +2583,7 @@ damp_add(struct damp * const d, const double v)
     d->hist[d->nr-1] = v;
   }
   d->nr_added++;
+  d->sum += v;
 }
 
   bool
@@ -2354,7 +2603,7 @@ damp_test(struct damp * const d)
 
   // full-distance history
   if (d->nr == d->cap) {
-    const double avg = damp_avg(d);
+    const double avg = damp_ravg(d);
     const double dev = avg * d->dlong;
     if (fabs(damp_max(d) - damp_min(d)) < dev)
       return true;
@@ -2376,6 +2625,7 @@ damp_clean(struct damp * const d)
 {
   d->nr = 0;
   d->nr_added = 0;
+  d->sum = 0;
 }
 
   void
@@ -2426,14 +2676,14 @@ vctr_add1(struct vctr * const v, const u64 i)
 vctr_add_atomic(struct vctr * const v, const u64 i, const size_t n)
 {
   if (i < v->nr)
-    (void)atomic_fetch_add_explicit(&(v->u[i].av), n, memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&(v->u[i].av), n, MO_RELAXED);
 }
 
   inline void
 vctr_add1_atomic(struct vctr * const v, const u64 i)
 {
   if (i < v->nr)
-    (void)atomic_fetch_add_explicit(&(v->u[i].av), 1, memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&(v->u[i].av), 1, MO_RELAXED);
 }
 
   inline void
@@ -2473,21 +2723,25 @@ vctr_destroy(struct vctr * const v)
 // rgen {{{
 
 // struct {{{
-enum rgen_type {
-  GEN_CONST,     // constant
-  GEN_INCS, GEN_INCU,    // +1
-  GEN_SKIPS, GEN_SKIPU,  // +n
-  GEN_DECS, GEN_DECU,    // -1
-  GEN_EXPO,         // exponential
-  GEN_ZIPF,         // Zipfian, 0 is the most popular.
-  GEN_XZIPF,        // ScrambledZipfian. scatters the "popular" items across the itemspace.
-  GEN_UNIZIPF,      // Uniform + Zipfian
-  GEN_UNIFORM,      // Uniformly distributed in an interval [a,b]
-  GEN_TRACE32,      // Read from a trace file with unit of u32.
-  GEN_TRACE64,      // Read from a trace file with unit of u64.
-};
+#define GEN_CONST    ((1))
+#define GEN_INCS     ((2))
+#define GEN_INCU     ((3))      // +1
+#define GEN_SKIPS    ((4))
+#define GEN_SKIPU    ((5))      // +n
+#define GEN_DECS     ((6))
+#define GEN_DECU     ((7))      // -1
+#define GEN_EXPO     ((8))      // exponential
+#define GEN_ZIPF     ((9))      // Zipfian, 0 is the most popular.
+#define GEN_XZIPF   ((10))      // ScrambledZipfian. scatters the "popular" items across the itemspace.
+#define GEN_UNIZIPF ((11))      // Uniform + Zipfian (multiple hills)
+#define GEN_ZIPFUNI ((12))      // Zipfian + Uniform (one hill)
+#define GEN_UNIFORM ((13))      // Uniformly distributed in an interval [a,b]
+#define GEN_TRACE32 ((14))      // Read from a trace file with unit of u32.
+#define GEN_LATEST  ((15))      // latest (moving head - zipfian)
 
-struct rgen_linear {
+#define GEN_ASYNC  ((255))      // async gen
+
+struct rgen_linear { // 8x4
   union {
     au64 ac;
     u64 uc;
@@ -2500,11 +2754,11 @@ struct rgen_linear {
   };
 };
 
-struct rgen_expo {
+struct rgen_expo { // 8
   double gamma;
 };
 
-struct rgen_trace32 {
+struct rgen_trace32 { // 8x5
   FILE * fin;
   u64 idx;
   u64 avail;
@@ -2512,7 +2766,7 @@ struct rgen_trace32 {
   u32 * buf;
 };
 
-struct rgen_zipfian {
+struct rgen_zipfian { // 8x9
   u64 mod;
   u64 base;
   double quick1;
@@ -2524,56 +2778,57 @@ struct rgen_zipfian {
   double theta;
 };
 
-struct rgen_uniform {
+struct rgen_uniform { // 8x3
   u64 base;
   u64 mod;
   double mul;
 };
 
-struct rgen_unizipf {
+struct rgen_unizipf { // 8x12
   struct rgen_zipfian zipfian;
   u64 usize;
   u64 zsize;
   u64 base;
 };
 
-struct rgen_xzipfian {
+struct rgen_xzipfian { // 8x10
   struct rgen_zipfian zipfian;
   u64 mul;
 };
 
-typedef u64 (*rgen_next_func)(struct rgen * const);
-
-#define RGEN_ABUF_NR ((4lu))
-struct rgen_worker_info {
-  union {
-    u64 * b64;
-    u32 * b32;
-  };
-  union { // guards
-    u64 * g64;
-    u32 * g32;
-  };
-  union {
-    u64 * bs64[RGEN_ABUF_NR];
-    u32 * bs32[RGEN_ABUF_NR];
-  };
-  u64 reader_id;
-  u64 padding0;
-  u8 * mem;
-  u64 mem_size;
-  u64 alloc_size;
-  abool avail[RGEN_ABUF_NR];
-  abool running;
-  rgen_next_func real_next;
-  u64 buffer_nr;
-  u64 cpu;
-  pthread_t thread;
+struct rgen_latest {
+  struct rgen_zipfian zipfian;
+  au64 head; // ever increasing
 };
 
+#define RGEN_ABUF_NR ((4))
+#define RGEN_ABUF_SZ ((1lu << 30))
+#define RGEN_ABUF_SZ1 ((RGEN_ABUF_SZ / RGEN_ABUF_NR))
+#define RGEN_ABUF_NR1_32 ((RGEN_ABUF_SZ1 / sizeof(u32)))
+#define RGEN_ABUF_NR1_64 ((RGEN_ABUF_SZ1 / sizeof(u64)))
+struct rgen_async {
+  union {
+    u8 * curr;
+    u64 * curr64;
+    u32 * curr32;
+  };
+  union {
+    u8 * guard;
+    u64 * guard64;
+    u32 * guard32;
+  };
+  struct rgen * real_gen;
+  u8 * mem;
+  abool running;
+  u8 reader_id;
+  u8 padding2[2];
+  abool avail[RGEN_ABUF_NR];
+  pthread_t pt;
+};
+
+typedef u64 (*rgen_next_func)(struct rgen * const);
+
 struct rgen {
-  rgen_next_func next_wait;
-  rgen_next_func next_nowait;
   union {
     struct rgen_linear       linear;
     struct rgen_expo         expo;
@@ -2582,17 +2837,32 @@ struct rgen {
     struct rgen_uniform      uniform;
     struct rgen_unizipf      unizipf;
     struct rgen_xzipfian     xzipfian;
+    struct rgen_latest       latest;
+    struct rgen_async        async;
   };
-  bool unit_u64;
-  bool async_worker;
-  enum rgen_type type;
+  rgen_next_func next;
+  union {
+    rgen_next_func next_nowait; // async only
+    rgen_next_func next_write; // latest only
+  };
   u64 min;
   u64 max;
-  struct rgen_worker_info wi;
+  u8 type; // use to be a enum
+  bool unit_u64;
+  bool async_worker; // has an async worker running
+  bool shared; // don't copy in rgen_fork()
 };
+
+  static void
+rgen_set_next(struct rgen * const gen, rgen_next_func next)
+{
+  gen->next = next;
+  //gen->next_nowait = next;
+  gen->next_nowait = NULL;
+}
 // }}} struct
 
-// core random {{{
+// random {{{
 // Lehmer's generator is 2x faster than xorshift
 /**
  * D. H. Lehmer, Mathematical methods in large-scale computing units.
@@ -2632,7 +2902,7 @@ random_double(void)
   const u64 r = random_u64();
   return ((double)r) * (1.0 / ((double)(~0lu)));
 }
-// }}} core random
+// }}} random
 
 // genenators {{{
 
@@ -2651,7 +2921,8 @@ rgen_new_const(const u64 c)
   gi->linear.base = c;
   gi->type = GEN_CONST;
   gi->min = gi->max = c;
-  gi->next_nowait = gi->next_wait = gen_constant;
+  rgen_set_next(gi, gen_constant);
+  gi->shared = true;
   return gi;
 }
 
@@ -2670,7 +2941,8 @@ rgen_new_expo(const double percentile, const double range)
   gi->expo.gamma = - log(1.0 - (percentile/100.0)) / range;
   gi->type = GEN_EXPO;
   gi->max = ~0lu;
-  gi->next_nowait = gi->next_wait = gen_expo;
+  rgen_set_next(gi, gen_expo);
+  gi->shared = true;
   return gi;
 }
 // }}} simple ones
@@ -2678,7 +2950,7 @@ rgen_new_expo(const double percentile, const double range)
 // linear {{{
   static struct rgen *
 rgen_new_linear(const u64 min, const u64 max, const s64 inc,
-    const enum rgen_type type, rgen_next_func func)
+    const u8 type, rgen_next_func func)
 {
   debug_assert(max > min);
   struct rgen * const gi = calloc(1, sizeof(*gi));
@@ -2690,21 +2962,21 @@ rgen_new_linear(const u64 min, const u64 max, const s64 inc,
   gi->type = type;
   gi->min = min;
   gi->max = max;
-  gi->next_nowait = gi->next_wait = func;
+  rgen_set_next(gi, func);
   return gi;
 }
 
   static u64
 gen_linear_incs_helper(struct rgen * const gi)
 {
-  u64 v = atomic_fetch_add(&(gi->linear.ac), 1);
+  u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), 1, MO_RELAXED);
   const u64 mod = gi->linear.mod;
   if (v >= mod) {
     do {
       v -= mod;
     } while (v >= mod);
     if (v == 0)
-      atomic_fetch_sub(&(gi->linear.ac), mod);
+      atomic_fetch_sub_explicit(&(gi->linear.ac), mod, MO_RELAXED);
   }
   return v;
 }
@@ -2730,7 +3002,9 @@ gen_incs(struct rgen * const gi)
   struct rgen *
 rgen_new_incs(const u64 min, const u64 max)
 {
-  return rgen_new_linear(min, max, 1, GEN_INCS, gen_incs);
+  struct rgen * const gen = rgen_new_linear(min, max, 1, GEN_INCS, gen_incs);
+  gen->shared = true;
+  return gen;
 }
 
   static u64
@@ -2746,40 +3020,47 @@ rgen_new_incu(const u64 min, const u64 max)
 }
 
   static u64
-gen_skips(struct rgen * const gi)
+gen_skips_up(struct rgen * const gi)
 {
-  if (gi->linear.inc >= 0) {
-    const u64 v = atomic_fetch_add(&(gi->linear.ac), gi->linear.inc_u64);
-    return gi->linear.base + (v % gi->linear.mod);
-  } else {
-    const u64 v = atomic_fetch_sub(&(gi->linear.ac), gi->linear.inc_u64);
-    return gi->linear.base - (v % gi->linear.mod);
-  }
+  const u64 v = atomic_fetch_add(&(gi->linear.ac), gi->linear.inc_u64);
+  return gi->linear.base + (v % gi->linear.mod);
+}
+
+  static u64
+gen_skips_down(struct rgen * const gi)
+{
+  const u64 v = atomic_fetch_sub(&(gi->linear.ac), gi->linear.inc_u64);
+  return gi->linear.base - (v % gi->linear.mod);
 }
 
   struct rgen *
 rgen_new_skips(const u64 min, const u64 max, const s64 inc)
 {
-  return rgen_new_linear(min, max, inc, GEN_SKIPS, gen_skips);
+  struct rgen * const gen = rgen_new_linear(min, max, inc, GEN_SKIPS, (inc >= 0) ? gen_skips_up : gen_skips_down);
+  gen->shared = true;
+  return gen;
 }
 
   static u64
-gen_skipu(struct rgen * const gi)
+gen_skipu_up(struct rgen * const gi)
 {
   const u64 v = gi->linear.uc % gi->linear.mod;
-  if (gi->linear.inc >= 0) {
-    gi->linear.uc += gi->linear.inc_u64;
-    return gi->linear.base + v;
-  } else {
-    gi->linear.uc -= gi->linear.inc_u64;
-    return gi->linear.base - v;
-  }
+  gi->linear.uc += gi->linear.inc_u64;
+  return gi->linear.base + v;
+}
+
+  static u64
+gen_skipu_down(struct rgen * const gi)
+{
+  const u64 v = gi->linear.uc % gi->linear.mod;
+  gi->linear.uc -= gi->linear.inc_u64;
+  return gi->linear.base - v;
 }
 
   struct rgen *
 rgen_new_skipu(const u64 min, const u64 max, const s64 inc)
 {
-  return rgen_new_linear(min, max, inc, GEN_SKIPU, gen_skipu);
+  return rgen_new_linear(min, max, inc, GEN_SKIPU, (inc >= 0) ? gen_skipu_up : gen_skipu_down);
 }
 
   static u64
@@ -2791,7 +3072,9 @@ gen_decs(struct rgen * const gi)
   struct rgen *
 rgen_new_decs(const u64 min, const u64 max)
 {
-  return rgen_new_linear(min, max, -1, GEN_DECS, gen_decs);
+  struct rgen * const gen = rgen_new_linear(min, max, -1, GEN_DECS, gen_decs);
+  gen->shared = true;
+  return gen;
 }
 
   static u64
@@ -2806,6 +3089,33 @@ rgen_new_decu(const u64 min, const u64 max)
   return rgen_new_linear(min, max, -1, GEN_DECU, gen_decu);
 }
 // }}} linear
+
+// uniform {{{
+  static u64
+gen_uniform(struct rgen * const gi)
+{
+  return gi->uniform.base + (u64)(((double)random_u64()) * gi->uniform.mul);
+}
+
+  struct rgen *
+rgen_new_uniform(const u64 min, const u64 max)
+{
+  struct rgen * const gi = calloc(1, sizeof(*gi));
+  gi->unit_u64 = max > UINT32_MAX;
+  gi->uniform.base = min;
+  const u64 mod = max - min + 1;
+  gi->uniform.mod = mod;
+  // 5.4..e-20 * (1 << 64) == 1 - epsilon
+  gi->uniform.mul = ((double)mod) * 5.421010862427521e-20;
+
+  gi->type = GEN_UNIFORM;
+  gi->min = min;
+  gi->max = max;
+  rgen_set_next(gi, gen_uniform);
+  gi->shared = true;
+  return gi;
+}
+// }}} uniform
 
 // zipf {{{
   static u64
@@ -2861,16 +3171,17 @@ zeta_range(const u64 start, const u64 count, const double theta)
   debug_assert(nth > 0);
   const size_t zisize = sizeof(struct zeta_range_info) + (sizeof(double) * nth);
   struct zeta_range_info * const zi = malloc(zisize);
-  if (zi == NULL) { // rollback
+  if (zi == NULL) { // fallback
     for (u64 i = 0; i < count; i++)
       sum += (1.0 / pow((double)(start + i + 1), theta));
     return sum;
   }
-  memset(zi, 0, zisize);
+  zi->seq = 0;
   zi->nth = nth;
   zi->start = start;
   zi->count = count;
   zi->theta = theta;
+  // workers fill sums
   thread_fork_join(nth, zeta_range_worker, false, zi);
   for (u64 i = 0; i < nth; i++)
     sum += zi->sums[i];
@@ -2931,7 +3242,8 @@ rgen_new_zipfian(const u64 min, const u64 max)
   gi->type = GEN_ZIPF;
   gi->min = min;
   gi->max = max;
-  gi->next_nowait = gi->next_wait = gen_zipfian;
+  rgen_set_next(gi, gen_zipfian);
+  gi->shared = true;
   return gi;
 #undef ZIPFIAN_CONSTANT
 }
@@ -2957,19 +3269,26 @@ rgen_new_xzipfian(const u64 min, const u64 max)
   }
   gi->unit_u64 = max > UINT32_MAX;
   gi->type = GEN_XZIPF;
-  gi->next_nowait = gi->next_wait = gen_xzipfian;
+  rgen_set_next(gi, gen_xzipfian);
   return gi;
 }
 
   static u64
 gen_unizipf(struct rgen * const gi)
 {
-  //// aggregated hot spots
-  //const u64 z = gen_zipfian(gi) * gi->unizipf.usize;
-  //const u64 u = random_u64() % gi->unizipf.usize;
-  //// scattered hot spots
+  // scattered hot spots
   const u64 z = gen_zipfian(gi);
   const u64 u = (random_u64() % gi->unizipf.usize) * gi->unizipf.zsize;
+
+  return gi->unizipf.base + z + u;
+}
+
+  static u64
+gen_zipfuni(struct rgen * const gi)
+{
+  // aggregated hot spots
+  const u64 z = gen_zipfian(gi) * gi->unizipf.usize;
+  const u64 u = random_u64() % gi->unizipf.usize;
 
   return gi->unizipf.base + z + u;
 }
@@ -2991,36 +3310,50 @@ rgen_new_unizipf(const u64 min, const u64 max, const u64 ufactor)
   gi->unizipf.base = min;
   gi->min = min;
   gi->max = max;
-  gi->next_nowait = gi->next_wait = gen_unizipf;
+  gi->type = GEN_UNIZIPF;
+  rgen_set_next(gi, gen_unizipf);
+  return gi;
+}
+
+  struct rgen *
+rgen_new_zipfuni(const u64 min, const u64 max, const u64 ufactor)
+{
+  struct rgen * const gi = rgen_new_unizipf(min, max, ufactor);
+  gi->type = GEN_ZIPFUNI;
+  rgen_set_next(gi, gen_zipfuni);
   return gi;
 }
 // }}} zipf
 
-// others {{{
+// latest {{{
   static u64
-gen_uniform(struct rgen * const gi)
+gen_latest_read(struct rgen * const gi)
 {
-  return gi->uniform.base + (u64)(((double)random_u64()) * gi->uniform.mul);
+  const u64 z = gen_zipfian(gi);
+  const u64 head = gi->latest.head;
+  return (head > z) ? (head - z) : 0;
+}
+
+  static u64
+gen_latest_write(struct rgen * const gi)
+{
+  return atomic_fetch_add_explicit(&(gi->latest.head), 1, MO_RELAXED);
 }
 
   struct rgen *
-rgen_new_uniform(const u64 min, const u64 max)
+rgen_new_latest(const u64 zipf_range)
 {
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  gi->unit_u64 = max > UINT32_MAX;
-  gi->uniform.base = min;
-  const u64 mod = max - min + 1;
-  gi->uniform.mod = mod;
-  // 5.4..e-20 * (1 << 64) == 1 - epsilon
-  gi->uniform.mul = ((double)mod) * 5.421010862427521e-20;
-
-  gi->type = GEN_UNIFORM;
-  gi->min = min;
-  gi->max = max;
-  gi->next_nowait = gi->next_wait = gen_uniform;
-  return gi;
+  struct rgen * const gen = rgen_new_zipfian(1, zipf_range?(zipf_range):1);
+  gen->type = GEN_LATEST;
+  gen->next = gen_latest_read;
+  gen->next_write = gen_latest_write;
+  gen->min = 0;
+  gen->max = UINT64_MAX;
+  return gen;
 }
+// }}} latest
 
+// trace {{{
   static u64
 gen_trace32(struct rgen * const gi)
 {
@@ -3059,7 +3392,7 @@ rgen_new_trace32(const char * const filename, const u64 bufsize)
   posix_fadvise(fileno(pt->fin), 0, 0, POSIX_FADV_SEQUENTIAL);
   gi->type = GEN_TRACE32;
   gi->max = ~0lu;
-  gi->next_nowait = gi->next_wait = gen_trace32;
+  rgen_set_next(gi, gen_trace32);
   return gi;
 }
 // }}} others
@@ -3080,40 +3413,42 @@ rgen_max(struct rgen * const gen)
 }
 
   inline u64
-rgen_next_wait(struct rgen * const gen)
+rgen_next(struct rgen * const gen)
 {
-  return gen->next_wait(gen);
+  return gen->next(gen);
 }
 
   inline u64
 rgen_next_nowait(struct rgen * const gen)
 {
+  debug_assert(gen->next_nowait);
   return gen->next_nowait(gen);
 }
 
-  static void
-rgen_clean_async_buffers(struct rgen_worker_info * const info)
+  inline u64
+rgen_next_write(struct rgen * const gen)
 {
-  if (info->mem == NULL)
+  debug_assert(gen->next_write);
+  return gen->next_write(gen);
+}
+
+  static void
+rgen_async_clean_buffers(struct rgen_async * const as)
+{
+  if (as->mem == NULL)
     return;
-  pages_unmap(info->mem, info->alloc_size);
-  info->mem = NULL;
-  for (u64 j = 0; j < RGEN_ABUF_NR; j++)
-    info->bs64[j] = NULL;
+  pages_unmap(as->mem, RGEN_ABUF_SZ);
+  as->mem = NULL;
 }
 
   void
 rgen_destroy(struct rgen * const gen)
 {
-  if (gen == NULL)
-    return;
-  if (gen->async_worker) {
-    struct rgen_worker_info * const info = &(gen->wi);
-    atomic_store(&(info->running), false);
-    pthread_join(info->thread, NULL);
-    rgen_clean_async_buffers(info);
-  }
-  if (gen->type == GEN_TRACE32) {
+  if (gen->type == GEN_ASYNC) {
+    gen->async.running = false;
+    pthread_join(gen->async.pt, NULL);
+    rgen_async_clean_buffers(&gen->async);
+  } else if (gen->type == GEN_TRACE32) {
     fclose(gen->trace32.fin);
     free(gen->trace32.buf);
   }
@@ -3126,10 +3461,12 @@ rgen_helper_message(void)
   fprintf(stderr, "%s Usage: rgen <type> ...\n", __func__);
   fprintf(stderr, "%s example: rgen const <value>\n", __func__);
   fprintf(stderr, "%s example: rgen expo <perc> <range>\n", __func__);
-  fprintf(stderr, "%s example: rgen unizipf <min> <max> <ufactor>\n", __func__);
   fprintf(stderr, "%s example: rgen uniform <min> <max>\n", __func__);
   fprintf(stderr, "%s example: rgen zipfian <min> <max>\n", __func__);
   fprintf(stderr, "%s example: rgen xzipfian <min> <max>\n", __func__);
+  fprintf(stderr, "%s example: rgen unizipf <min> <max> <ufactor>\n", __func__);
+  fprintf(stderr, "%s example: rgen zipfuni <min> <max> <ufactor>\n", __func__);
+  fprintf(stderr, "%s example: rgen latest <zipf-range>\n", __func__);
   fprintf(stderr, "%s example: rgen incs <min> <max>\n", __func__);
   fprintf(stderr, "%s example: rgen incu <min> <max>\n", __func__);
   fprintf(stderr, "%s example: rgen decs <min> <max>\n", __func__);
@@ -3153,9 +3490,6 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
   } else if ((0 == strcmp(argv[1], "expo")) && (argc >= 4)) {
     gen = rgen_new_expo(atof(argv[2]), atof(argv[3]));
     ret = 4;
-  } else if ((0 == strcmp(argv[1], "unizipf")) && (argc >= 5)) {
-    gen = rgen_new_unizipf(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
-    ret = 5;
   } else if ((0 == strcmp(argv[1], "uniform")) && (argc >= 4)) {
     gen = rgen_new_uniform(a2u64(argv[2]), a2u64(argv[3]));
     ret = 4;
@@ -3165,6 +3499,15 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
   } else if ((0 == strcmp(argv[1], "xzipfian")) && (argc >= 4)) {
     gen = rgen_new_xzipfian(a2u64(argv[2]), a2u64(argv[3]));
     ret = 4;
+  } else if ((0 == strcmp(argv[1], "unizipf")) && (argc >= 5)) {
+    gen = rgen_new_unizipf(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
+    ret = 5;
+  } else if ((0 == strcmp(argv[1], "zipfuni")) && (argc >= 5)) {
+    gen = rgen_new_zipfuni(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
+    ret = 5;
+  } else if ((0 == strcmp(argv[1], "latest")) && (argc >= 3)) {
+    gen = rgen_new_latest(a2u64(argv[2]));
+    ret = 3;
   } else if ((0 == strcmp(argv[1], "incs")) && (argc >= 4)) {
     gen = rgen_new_incs(a2u64(argv[2]), a2u64(argv[3]));
     ret = 4;
@@ -3194,132 +3537,134 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
 
 // async {{{
   static void *
-rgen_worker(void * const ptr)
+rgen_async_worker(void * const ptr)
 {
-  struct rgen * const gen = (typeof(gen))ptr;
-  struct rgen_worker_info * const info = &(gen->wi);
-  const u64 cpu = info->cpu;
-  srandom_u64((cpu + 3) * 97);
-  const u64 nr = info->buffer_nr;
+  struct rgen * const agen = (typeof(agen))ptr;
+  struct rgen_async * const as = &(agen->async);
+  struct rgen * const real_gen = as->real_gen;
+  rgen_next_func real_next = real_gen->next;
+  srandom_u64(time_nsec());
 #pragma nounroll
   while (true) {
     for (u64 i = 0; i < RGEN_ABUF_NR; i++) {
 #pragma nounroll
-      while (atomic_load(&(info->avail[i])) == true) {
-        usleep(100);
-        if (atomic_load(&(info->running)) == false)
+      while (as->avail[i]) {
+        usleep(1);
+        if (!as->running)
           return NULL;
       }
-      if (gen->unit_u64) {
-        u64 * const buf64 = info->bs64[i];
-        for (u64 j = 0; j < nr; j++)
-          buf64[j] = info->real_next(gen);
+      if (agen->unit_u64) {
+        u64 * const buf64 = (u64 *)(as->mem + (i * RGEN_ABUF_SZ1));
+        for (u64 j = 0; j < RGEN_ABUF_NR1_64; j++)
+          buf64[j] = real_next(real_gen);
       } else {
-        u32 * const buf32 = info->bs32[i];
-        for (u64 j = 0; j < nr; j++)
-          buf32[j] = (u32)(info->real_next(gen));
+        u32 * const buf32 = (u32 *)(as->mem + (i * RGEN_ABUF_SZ1));
+        for (u64 j = 0; j < RGEN_ABUF_NR1_32; j++)
+          buf32[j] = (u32)real_next(real_gen);
       }
-      atomic_store(&(info->avail[i]), true);
+      as->avail[i] = true;
     }
   }
   return NULL;
 }
 
   static void
-rgen_async_wait_at(struct rgen * const gen, const u64 id)
+rgen_async_wait_at(struct rgen * const gen, const u8 id)
 {
-  abool * const pavail = &(gen->wi.avail[id]);
+  debug_assert(gen->type == GEN_ASYNC);
 #pragma nounroll
-  while (atomic_load(pavail) == false)
-    usleep(1);
+  while (!gen->async.avail[id])
+    cpu_pause();
 }
 
   void
 rgen_async_wait(struct rgen * const gen)
 {
-  if (gen->async_worker == false)
-    return;
-  rgen_async_wait_at(gen, gen->wi.reader_id);
+  if (gen->type == GEN_ASYNC)
+    rgen_async_wait_at(gen, gen->async.reader_id);
 }
 
   void
 rgen_async_wait_all(struct rgen * const gen)
 {
-  if (gen->async_worker == false)
-    return;
-  for (u64 i = 0; i < RGEN_ABUF_NR; i++)
-    rgen_async_wait_at(gen, i);
+  if (gen->type == GEN_ASYNC) {
+    rgen_async_wait_at(gen, 0);
+    rgen_async_wait_at(gen, 1);
+    rgen_async_wait_at(gen, 2);
+    rgen_async_wait_at(gen, 3);
+  }
+}
+
+  static inline void
+rgen_async_switch(struct rgen * const gen)
+{
+  struct rgen_async * const as = &(gen->async);
+  as->avail[as->reader_id] = false;
+  as->reader_id = (as->reader_id + 1) % RGEN_ABUF_NR;
+  as->curr = as->mem + (as->reader_id * RGEN_ABUF_SZ1);
+  as->guard = as->curr + RGEN_ABUF_SZ1;
 }
 
   static u64
-rgen_async_next_wait32(struct rgen * const gen)
+rgen_async_next_32(struct rgen * const gen)
 {
-  struct rgen_worker_info * const info = &(gen->wi);
-  const u64 r = (u64)(*(info->b32));
-  info->b32++;
-  if (info->b32 == info->g32) {
-    atomic_store(&(info->avail[info->reader_id]), false);
-    info->reader_id = (info->reader_id + 1) % RGEN_ABUF_NR;
-    info->b32 = info->bs32[info->reader_id];
-    info->g32 = info->b32 + info->buffer_nr;
+  struct rgen_async * const as = &(gen->async);
+  const u64 r = (u64)(*as->curr32);
+  as->curr32++;
+  if (unlikely(as->curr32 == as->guard32)) {
+    rgen_async_switch(gen);
     rgen_async_wait(gen);
   }
   return r;
 }
 
   static u64
-rgen_async_next_wait64(struct rgen * const gen)
+rgen_async_next_64(struct rgen * const gen)
 {
-  struct rgen_worker_info * const info = &(gen->wi);
-  const u64 r = *(info->b64);
-  info->b64++;
-  if (info->b64 == info->g64) {
-    atomic_store(&(info->avail[info->reader_id]), false);
-    info->reader_id = (info->reader_id + 1) % RGEN_ABUF_NR;
-    info->b64 = info->bs64[info->reader_id];
-    info->g64 = info->b64 + info->buffer_nr;
+  struct rgen_async * const as = &(gen->async);
+  const u64 r = *as->curr64;
+  as->curr64++;
+  if (unlikely(as->curr64 == as->guard64)) {
+    rgen_async_switch(gen);
     rgen_async_wait(gen);
   }
   return r;
 }
 
   static u64
-rgen_async_next_nowait32(struct rgen * const gen)
+rgen_async_next_32_nowait(struct rgen * const gen)
 {
-  struct rgen_worker_info * const info = &(gen->wi);
-  const u64 r = (u64)(*(info->b32));
-  info->b32++;
-  if (info->b32 == info->g32) {
-    info->reader_id = (info->reader_id + 1) % RGEN_ABUF_NR;
-    info->b32 = info->bs32[info->reader_id];
-    info->g32 = info->b32 + info->buffer_nr;
+  struct rgen_async * const as = &(gen->async);
+  const u64 r = (u64)(*as->curr32);
+  as->curr32++;
+  if (unlikely(as->curr32 == as->guard32)) {
+    rgen_async_switch(gen);
   }
   return r;
 }
 
   static u64
-rgen_async_next_nowait64(struct rgen * const gen)
+rgen_async_next_64_nowait(struct rgen * const gen)
 {
-  struct rgen_worker_info * const info = &(gen->wi);
-  const u64 r = *(info->b64);
-  info->b64++;
-  if (info->b64 == info->g64) {
-    info->reader_id = (info->reader_id + 1) % RGEN_ABUF_NR;
-    info->b64 = info->bs64[info->reader_id];
-    info->g64 = info->b64 + info->buffer_nr;
+  struct rgen_async * const as = &(gen->async);
+  const u64 r = *as->curr64;
+  as->curr64++;
+  if (unlikely(as->curr64 == as->guard64)) {
+    rgen_async_switch(gen);
   }
   return r;
 }
 
   struct rgen *
-rgen_dup(struct rgen * const gen0)
+rgen_fork(struct rgen * const gen0)
 {
-  if (gen0->async_worker)
+  if (gen0->type == GEN_ASYNC)
     return NULL;
+  if (gen0->shared)
+    return gen0;
+
   struct rgen * const gen = malloc(sizeof(*gen));
   memcpy(gen, gen0, sizeof(*gen));
-  struct rgen_worker_info * const info = &(gen->wi);
-  memset(info, 0, sizeof(*info));
   if (gen->type == GEN_TRACE32) {
     FILE * const f2 = fdopen(dup(fileno(gen0->trace32.fin)), "rb");
     posix_fadvise(fileno(f2), 0, 0, POSIX_FADV_SEQUENTIAL);
@@ -3330,58 +3675,73 @@ rgen_dup(struct rgen * const gen0)
   return gen;
 }
 
-  static void *
-rgen_async_convert_mem_worker(void * const ptr)
+  void
+rgen_join(struct rgen * const gen)
 {
-  struct rgen_worker_info * const info = (typeof(info))ptr;
-  info->mem = pages_alloc_best(info->mem_size, true, &(info->alloc_size));
+  if (!gen->shared)
+    rgen_destroy(gen);
+}
+
+  static void *
+rgen_async_create_mem_worker(void * const ptr)
+{
+  struct rgen_async * const as = (typeof(as))ptr;
+  size_t sz = 0;
+  as->mem = pages_alloc_best(RGEN_ABUF_SZ, true, &sz);
+  debug_assert(sz == RGEN_ABUF_SZ);
   return NULL;
 }
 
-  bool
-rgen_async_convert(struct rgen * const gen, const u32 cpu)
+  struct rgen *
+rgen_async_create(struct rgen * const gen0, const u32 cpu)
 {
-  if (gen == NULL || gen->async_worker)
-    return false; // already converted
+  // TODO: async on async might just work?
+  if (gen0 == NULL || gen0->type == GEN_ASYNC)
+    return NULL;
 
-  struct rgen_worker_info * const info = &(gen->wi);
-  memset(info, 0, sizeof(*info));
+  struct rgen * const agen = calloc(1, sizeof(*agen));
+  struct rgen_async * const as = &(agen->async);
 
-  info->mem_size = 1lu << 30;
+  as->real_gen = gen0;
   pthread_t pt_mem;
-  thread_create_at(cpu, &pt_mem, rgen_async_convert_mem_worker, info);
+  thread_create_at(cpu, &pt_mem, rgen_async_create_mem_worker, as);
   pthread_join(pt_mem, NULL);
-  if (info->mem == NULL) {
-    fprintf(stderr, "cannot allocate memory for the async worker\n");
-    return false; // insufficient memory
+  if (as->mem == NULL) {
+    fprintf(stderr, "%s: cannot allocate memory for the async worker\n", __func__);
+    free(agen);
+    return NULL; // insufficient memory
   }
 
-  info->real_next = gen->next_wait;
-  const u64 usize = gen->unit_u64 ? sizeof(u64) : sizeof(u32);
-  info->buffer_nr = info->mem_size / (RGEN_ABUF_NR * usize);
-  info->cpu = cpu;
-  atomic_store(&(info->running), true);
-  for (u64 j = 0; j < RGEN_ABUF_NR; j++) {
-    info->bs64[j] = (u64 *)(&(info->mem[j * info->buffer_nr * usize]));
-    atomic_store(&(info->avail[j]), false);
-  }
-  info->b64 = info->bs64[0]; // i == 0;
-  info->g64 = info->b64 + info->buffer_nr;
-  gen->next_wait = gen->unit_u64 ? rgen_async_next_wait64 : rgen_async_next_wait32;
-  gen->next_nowait = gen->unit_u64 ? rgen_async_next_nowait64 : rgen_async_next_nowait32;
-  if (thread_create_at(cpu, &(info->thread), rgen_worker, gen) == 0) {
+  as->running = true; // create thread below
+  as->curr = as->mem;
+  as->guard = as->mem + RGEN_ABUF_SZ1;
+  // gen
+  agen->next = gen0->unit_u64 ? rgen_async_next_64 : rgen_async_next_32;
+  agen->next_nowait = gen0->unit_u64 ? rgen_async_next_64_nowait : rgen_async_next_32_nowait;
+  agen->type = GEN_ASYNC;
+  agen->unit_u64 = gen0->unit_u64;
+  agen->min = gen0->min;
+  agen->max = gen0->max;
+
+  // start worker
+  if (thread_create_at(cpu, &(as->pt), rgen_async_worker, agen) == 0) {
     char thname[32];
-    sprintf(thname, "rgen_async_%u", cpu);
-    thread_set_name(info->thread, thname);
-    info->reader_id = 0;
-    gen->async_worker = true;
-    return true;
+    sprintf(thname, "agen_%u", cpu);
+    thread_set_name(as->pt, thname);
+    gen0->async_worker = true; // deprecated
+    return agen;
   } else {
-    rgen_clean_async_buffers(info);
-    return false;
+    rgen_async_clean_buffers(as);
+    free(agen);
+    return NULL;
   }
 }
+
 #undef RGEN_ABUF_NR
+#undef RGEN_ABUF_SZ
+#undef RGEN_ABUF_SZ1
+#undef RGEN_ABUF_NR1_32
+#undef RGEN_ABUF_NR1_64
 // }}} async
 
 // }}} rgen
@@ -3543,24 +3903,35 @@ rcu_update(struct rcu * const rcu, void * const ptr)
 // }}} multi-rcu
 
 // qsbr {{{
-#define QSBR_STATES_NR ((22)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
+#define QSBR_STATES_NR ((23)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
 #define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1)
 #define QSBR_SHARD_BITS  ((5)) // bits <= 6
 #define QSBR_SHARD_NR    (((1u) << QSBR_SHARD_BITS))
 #define QSBR_SHARD_MASK  ((QSBR_SHARD_NR - 1))
-#define QSBR_CAPACITY ((QSBR_STATES_NR * QSBR_SHARD_NR))
-#define QSBR_MHASH_SHIFT ((32 - QSBR_SHARD_BITS))
+
+struct qsbr_ref_real {
+#ifdef QSBR_DEBUG
+  pthread_t ptid; // 8
+  u32 status; // 4
+  u32 nbt; // 4 (number of backtrace frames)
+#define QSBR_DEBUG_BTNR ((14))
+  void * backtrace[QSBR_DEBUG_BTNR];
+#endif
+  au64 qstate; // user updates it
+  struct qsbr_ref_real * volatile * pptr; // internal only
+  struct qsbr_ref_real * park;
+};
+
+static_assert(sizeof(struct qsbr_ref) == sizeof(struct qsbr_ref_real), "sizeof qsbr_ref");
 
 // Quiescent-State-Based Reclamation RCU
 struct qsbr {
-  volatile u64 target;
-  u64 padding0[7];
+  struct qsbr_ref_real target;
+  u64 padding0[5];
   struct qshard {
-    spinlock lock;
-    volatile u64 bitmap;
-    volatile u64 * volatile ptrs[QSBR_STATES_NR];
+    au64 bitmap;
+    struct qsbr_ref_real * volatile ptrs[QSBR_STATES_NR];
   } shards[QSBR_SHARD_NR];
-  volatile u64 * wait_ptrs[QSBR_CAPACITY];
 };
 
   struct qsbr *
@@ -3568,72 +3939,115 @@ qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
   memset(q, 0, sizeof(*q));
-  for (u32 i = 0; i < QSBR_SHARD_NR; i++)
-    spinlock_init(&q->shards[i].lock);
   return q;
 }
 
   static inline struct qshard *
-qsbr_shard(struct qsbr * const q, volatile u64 * const ptr)
+qsbr_shard(struct qsbr * const q, void * const ptr)
 {
   const u32 sid = crc32c_u64(0, (u64)ptr) & QSBR_SHARD_MASK;
   debug_assert(sid < QSBR_SHARD_NR);
   return &(q->shards[sid]);
 }
 
-  bool
-qsbr_register(struct qsbr * const q, volatile u64 * const ptr)
+  static inline void
+qsbr_write_qstate(struct qsbr_ref_real * const ref, const u64 v)
 {
-  debug_assert(ptr);
-  struct qshard * const shard = qsbr_shard(q, ptr);
-  spinlock_lock(&(shard->lock));
-  const u64 bits = shard->bitmap;
-  if (bits < QSBR_BITMAP_FULL) {
+  atomic_store_explicit(&ref->qstate, v, MO_RELAXED);
+}
+
+  bool
+qsbr_register(struct qsbr * const q, struct qsbr_ref * const qref)
+{
+  struct qsbr_ref_real * const ref = (typeof(ref))qref;
+  struct qshard * const shard = qsbr_shard(q, ref);
+  qsbr_write_qstate(ref, 0);
+
+  do {
+    u64 bits = atomic_load_explicit(&shard->bitmap, MO_CONSUME);
+    if (unlikely(bits == QSBR_BITMAP_FULL))
+      return false;
+
     const u32 pos = (u32)__builtin_ctzl(~bits);
+    const u64 bits1 = bits | (1lu << pos);
     debug_assert(pos < QSBR_STATES_NR);
-    shard->bitmap |= (1lu << pos);
-    shard->ptrs[pos] = ptr;
-    spinlock_unlock(&(shard->lock));
-    return true;
-  }
-  spinlock_unlock(&(shard->lock));
-  return false;
+    if (atomic_compare_exchange_weak_explicit(&shard->bitmap, &bits, bits1, MO_ACQUIRE, MO_RELAXED)) {
+      shard->ptrs[pos] = ref;
+
+      ref->pptr = &(shard->ptrs[pos]);
+      ref->park = &q->target;
+#ifdef QSBR_DEBUG
+      ref->ptid = (u64)pthread_self();
+      ref->tid = 0;
+      ref->status = 1;
+      ref->nbt = backtrace(ref->backtrace, QSBR_DEBUG_BTNR);
+#endif
+      return true;
+    }
+  } while (true);
 }
 
   void
-qsbr_unregister(struct qsbr * const q, volatile u64 * const ptr)
+qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref)
 {
-  debug_assert(ptr);
-  struct qshard * const shard = qsbr_shard(q, ptr);
-  for (u64 bits = shard->bitmap; bits; bits &= (bits - 1)) {
-    const u32 pos = (u32)__builtin_ctzl(bits);
-    debug_assert(pos < QSBR_STATES_NR);
-    if (shard->ptrs[pos] == ptr) {
-      shard->ptrs[pos] = &q->target;
-#pragma nounroll
-      while (spinlock_trylock_nr(&(shard->lock), 64) == false) {
-#if defined(CORR)
-        corr_yield();
+  struct qsbr_ref_real * const ref = (typeof(ref))qref;
+  struct qshard * const shard = qsbr_shard(q, ref);
+  const u32 pos = (u32)(ref->pptr - shard->ptrs);
+  debug_assert(pos < QSBR_STATES_NR);
+  debug_assert(shard->bitmap & (1lu << pos));
+  shard->ptrs[pos] = &q->target;
+  atomic_fetch_and_explicit(&shard->bitmap, ~(1lu << pos), MO_RELEASE);
+#ifdef QSBR_DEBUG
+  ref->tid = 0;
+  ref->ptid = 0;
+  ref->status = 0xffff; // unregistered
+  ref->nbt = 0;
 #endif
-      }
-      shard->bitmap &= ~(1lu << pos);
-      spinlock_unlock(&(shard->lock));
-      return;
-    }
-  }
-  debug_die(); // bad ptr
+  ref->pptr = NULL;
+}
+
+  inline void
+qsbr_update(struct qsbr_ref * const qref, const u64 v)
+{
+  struct qsbr_ref_real * const ref = (typeof(ref))qref;
+  debug_assert((*ref->pptr) == ref); // must be unparked
+  // rcu update does not require release or acquire order
+  qsbr_write_qstate(ref, v);
+}
+
+  inline void
+qsbr_park(struct qsbr_ref * const qref)
+{
+  cpu_cfence();
+  struct qsbr_ref_real * const ref = (typeof(ref))qref;
+  *ref->pptr = ref->park;
+#ifdef QSBR_DEBUG
+  ref->status = 0xfff; // parked
+#endif
+}
+
+  inline void
+qsbr_resume(struct qsbr_ref * const qref)
+{
+  struct qsbr_ref_real * const ref = (typeof(ref))qref;
+  *ref->pptr = ref;
+#ifdef QSBR_DEBUG
+  ref->status = 0xf; // resumed
+#endif
+  cpu_cfence();
 }
 
 // waiters needs external synchronization
   void
 qsbr_wait(struct qsbr * const q, const u64 target)
 {
-  q->target = target;
+  cpu_cfence();
+  qsbr_write_qstate(&q->target, target);
   u64 cbits = 0; // check-bits
   u64 bms[QSBR_SHARD_NR]; // copy of all bitmap
   // take an unsafe snapshot of active users
   for (u32 i = 0; i < QSBR_SHARD_NR; i++) {
-    bms[i] = q->shards[i].bitmap;
+    bms[i] = atomic_load_explicit(&q->shards[i].bitmap, MO_CONSUME);
     if (bms[i])
       cbits |= (1lu << i); // set to 1 if [i] has ptrs
   }
@@ -3642,13 +4056,13 @@ qsbr_wait(struct qsbr * const q, const u64 target)
     for (u64 ctmp = cbits; ctmp; ctmp &= (ctmp - 1)) {
       const u32 i = (u32)__builtin_ctzl(ctmp);
       struct qshard * const shard = &(q->shards[i]);
-      spinlock_lock(&shard->lock);
+      const u64 bits1 = atomic_load_explicit(&(shard->bitmap), MO_CONSUME);
       for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
-        u64 bit = bits & -bits;
-        if (((shard->bitmap & bit) == 0) || ((*(shard->ptrs[__builtin_ctzl(bit)])) == target))
+        const u64 bit = bits & -bits; // cppcheck-suppress oppositeExpression
+        if (((bits1 & bit) == 0) ||
+            (atomic_load_explicit(&(shard->ptrs[__builtin_ctzl(bit)]->qstate), MO_CONSUME) == target))
           bms[i] &= ~bit;
       }
-      spinlock_unlock(&shard->lock);
       if (bms[i] == 0)
         cbits &= ~(1lu << i);
     }
@@ -3657,6 +4071,7 @@ qsbr_wait(struct qsbr * const q, const u64 target)
 #endif
   }
   debug_assert(cbits == 0);
+  cpu_cfence();
 }
 
   void
@@ -3689,7 +4104,7 @@ server_master(void * const ptr)
 {
   const u32 nr_cores0 = process_affinity_count();
   u32 * const cores = calloc(nr_cores0, sizeof(cores[0]));
-  const u32 nr_cores = process_affinity_list(nr_cores0, cores);
+  const u32 nr_cores = process_getaffinity_list(nr_cores0, cores);
   u32 seq = 0;
 
   struct server * const server = (typeof(server))ptr;
@@ -3933,6 +4348,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     struct pass_info * const pi, const int nr_wargs0)
 {
 #define FORKER_GEN_SYNC   ((0))
+  //      FORKER_GEN_WAIT   ((1))
 #define FORKER_GEN_NOWAIT ((2))
   // pass <nth> <end-type> <magic> <repeat> <rgen_opt> <nr_wargs> ...
 #define PASS_NR_ARGS ((7))
@@ -3953,7 +4369,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
 
   const u32 nr_cores = process_affinity_count();
   u32 cores[CPU_SETSIZE];
-  process_affinity_list(nr_cores, cores);
+  process_getaffinity_list(nr_cores, cores);
   struct damp * const damp = damp_create(7, 0.004, 0.05);
   const char * const ascfg = getenv("FORKER_ASYNC_SHIFT");
   const u32 async_shift = ascfg ? ((u32)a2s32(ascfg)) : 1;
@@ -3966,7 +4382,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     wi->thread_func = pi->wf;
     wi->passdata[0] = pi->passdata[0];
     wi->passdata[1] = pi->passdata[1];
-    wi->gen = rgen_dup(pi->gen0);
+    wi->gen = rgen_fork(pi->gen0);
     wi->seed = (i + 73) * 117;
     wi->end_type = end_type;
     if (end_type == FORKER_END_COUNT) // else: endtime will be set later
@@ -3982,11 +4398,13 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     wi->papi_vctr_base = pi->vctr_size;
 
     if (rgen_opt != FORKER_GEN_SYNC) {
-      const bool rconv = rgen_async_convert(wi->gen, cores[i % nr_cores] + async_shift);
-      (void)rconv;
-      debug_assert(rconv);
+      wi->gen_back = wi->gen;
+      wi->gen = rgen_async_create(wi->gen_back, cores[i % nr_cores] + async_shift);
+      debug_assert(wi->gen);
     }
-    wi->rgen_next = (rgen_opt == FORKER_GEN_NOWAIT) ? wi->gen->next_nowait : wi->gen->next_wait;
+    wi->rgen_next = (rgen_opt == FORKER_GEN_NOWAIT) ? wi->gen->next_nowait : wi->gen->next;
+    // use a different next_write ONLY in one case: sync latest
+    wi->rgen_next_write = (wi->gen->type == GEN_LATEST) ? wi->gen->next_write : wi->rgen_next;
   }
 
   bool done = false;
@@ -4038,7 +4456,12 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
   vctr_destroy(va);
   damp_destroy(damp);
   for (u64 i = 0; i < cc; i++) {
-    rgen_destroy(wis[i]->gen);
+    if (wis[i]->gen_back) {
+      rgen_destroy(wis[i]->gen); // async
+      rgen_join(wis[i]->gen_back); // real
+    } else {
+      rgen_join(wis[i]->gen); // real
+    }
     vctr_destroy(wis[i]->vctr);
   }
   free(wis);
@@ -4118,33 +4541,15 @@ forker_passes_message(void)
   bool
 forker_main(int argc, char ** argv, int(*test_func)(const int, char ** const))
 {
-  if (argc < 2)
+  if (argc < 1)
     return false;
 
-  if (strcmp(argv[0], "-") != 0) {
-    const int fd1 = open(argv[0], O_CREAT | O_WRONLY | O_TRUNC, 00644);
-    if (fd1 >= 0) {
-      dup2(fd1, 1);
-      close(fd1);
-    }
-  }
-
-  if (strcmp(argv[1], "-") != 0) {
-    const int fd2 = open(argv[1], O_CREAT | O_WRONLY | O_TRUNC, 00644);
-    if (fd2 >= 0) {
-      dup2(fd2, 2);
-      close(fd2);
-    }
-  }
   // record args
   for (int i = 0; i < argc; i++)
     fprintf(stderr, " %s", argv[i]);
 
   fprintf(stderr, "\n");
   fflush(stderr);
-
-  argc -= 2;
-  argv += 2;
 
   while (argc) {
     if (strcmp(argv[0], "api") != 0) {

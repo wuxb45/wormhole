@@ -43,7 +43,7 @@ kv_load_worker(const struct kvmap_info * const info)
   debug_assert(buf);
   u64 * buf64 = (typeof(buf64))buf;
   for (u64 i = n0; i < nz; i++) {
-    const u64 klen = rgen_next_wait(gi);
+    const u64 klen = rgen_next(gi);
     const u64 klen8 = (klen + 7) >> 3;
     /*
        buf64[0] = bswap_64(i); // little endian
@@ -102,8 +102,8 @@ kv_stress_worker(const struct kvmap_info * const info)
   void * ref = kvmap_ref(api, map);
   const bool rgen_sel = (random_u64() & 0x1000) == 0;
   struct rgen * const gi = rgen_sel ? rgen_new_uniform(0, nkeys-1) : rgen_new_zipfian(0, nkeys-1);
-  struct kv * next = keys[rgen_next_wait(gi)];
-  u64 rnext = rgen_next_wait(gi);
+  struct kv * next = keys[rgen_next(gi)];
+  u64 rnext = rgen_next(gi);
   struct kv * const getbuf = malloc(1000);
   debug_assert(getbuf);
   struct sbuf * const sbuf = malloc(1000);
@@ -119,7 +119,7 @@ kv_stress_worker(const struct kvmap_info * const info)
       next = keys[rnext];
       cpu_prefetchr(next, 0);
       cpu_prefetchr(((u8 *)next) + 64, 0);
-      rnext = rgen_next_wait(gi);
+      rnext = rgen_next(gi);
       cpu_prefetchr(&(keys[rnext]), 0);
 
       // do probe
@@ -153,8 +153,8 @@ kv_stress_worker(const struct kvmap_info * const info)
         (void)kvmap_kv_del(api, ref, key);
         break;
       case 11: case 12:
-        if (api->inp)
-          kvmap_kv_inp(api, ref, key, kv_plus1, NULL);
+        if (api->inpr)
+          kvmap_kv_inpr(api, ref, key, kv_plus1, NULL);
         break;
       case 13: case 14: case 15:
         if (!kvmap_kv_set(api, ref, key))
@@ -211,7 +211,7 @@ main(int argc, char ** argv)
     fprintf(stderr, "api not supported\n");
     exit(0);
   }
-  if (!api->inp) {
+  if (!api->inpr) {
     fprintf(stderr, "inplace function not found: ignored\n");
   }
   const bool has_iter = api->iter_create && api->iter_seek && api->iter_peek &&
