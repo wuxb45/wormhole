@@ -77,9 +77,9 @@ Similarly, `kref_refill_hash32()` calculates the 32-bit hash for `struct kref`.
 The Wormhole functions are listed near the bottom of wh.h (see the `wormhole_*` functions).
 `demo1.c` and `concbench.c` are examples of how to use a Wormhole index.
 There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
-* `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimum complexity in your code, you should use `whsafe`.
-* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort to avoid deadlocks.
-* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform any concurrency control. It works in multi-reader or single-writer environments.
+* `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimal complexity in your code, you should use `whsafe`.
+* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for deadlock avoidance.
+* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform any concurrency control. It works correctly only in multi-reader or single-writer environments.
 
 ### The `whsafe` API
 The `whsafe` API functions are listed in the `kvmap_api_whsafe` structure in `wh.c`. The API consists of a mix of `wormhole_*` and `whsafe_*` functions.
