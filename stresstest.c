@@ -178,6 +178,7 @@ kv_stress_worker(const struct kvmap_info * const info)
 helper_msg(void)
 {
   fprintf(stderr, "usage: [api ...] <#keys> [<#load-/unload-threads>=1] [<#threads>=1] [<rounds>=10] [<epochs>=10]\n");
+  fprintf(stderr, "example: ./stresstest.out api wormhole 1000000 4 4\n");
   kvmap_api_helper_message();
 }
 
