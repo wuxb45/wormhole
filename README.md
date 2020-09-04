@@ -7,8 +7,11 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
+## NEWS
+* The `whsafe` API is a *worry-free* thread-safe wormhole API. At a small performance cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
+* `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
+
 ## Highlights:
-* (New) `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
 * Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
@@ -72,11 +75,61 @@ Similarly, `kref_refill_hash32()` calculates the 32-bit hash for `struct kref`.
 ## The Wormhole API
 
 The Wormhole functions are listed near the bottom of wh.h (see the `wormhole_*` functions).
-`demo1.c` and `concbench.c` are examples of how to use the Wormhole index.
+`demo1.c` and `concbench.c` are examples of how to use a Wormhole index.
+There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
+* `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimum complexity in your code, you should use `whsafe`.
+* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort to avoid deadlocks.
+* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform any concurrency control. It works in multi-reader or single-writer environments.
 
-### The thread-safe API
-The index operations (GET, SET, UPDATE, DEL, PROBE, and SCAN (`wormhole_iter_*` functions)) are all *thread safe*.
-A thread needs to hold a reference of the index (_wormref_) to perform safe index operations. For example:
+### The `whsafe` API
+The `whsafe` API functions are listed in the `kvmap_api_whsafe` structure in `wh.c`. The API consists of a mix of `wormhole_*` and `whsafe_*` functions.
+
+The index operations (GET, SET, UPDATE, DEL, PROBE, INPLACE, MERGE, and SCAN (`wormhole_iter_*` functions)) are all *thread safe*.
+A thread needs to hold a reference of the index (_wormref_) to perform safe index operations.
+
+An example of using point-query operations using the `whsafe` API.
+
+    index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
+    ref = whsafe_ref(index);
+    for (...) {
+      whsafe_set(ref, ...);
+      whsafe_get(ref, ...);
+      whsafe_del(ref, ...);
+      ... // other safe operations
+    }
+    ... // other safe operations
+    wormhole_unref(ref);
+    wormhole_destroy(index);
+
+An example of range-query operations:
+
+    ref = whsafe_ref(index);
+    // ... assume we already have a valid ref
+    iter = wormhole_iter_create(ref);
+    for (...) {
+      whsafe_iter_seek(iter, key);
+      wormhole_iter_peek(iter, buf);
+      wormhole_iter_skip(iter, 1);
+      wormhole_iter_peek(iter, buf);
+      wormhole_iter_skip(iter, 3);
+      wormhole_iter_inp(iter, uf, priv);
+      // other iter operations
+    }
+    // An active iterator is likely holding a lock.
+    whsafe_iter_park(iter); // Release resources to avoid blocking other threads
+    // it's now safe to do something such as sleep() or waitpid()
+    // ... start using the iterator again
+    whsafe_iter_seek(iter, key2);
+    // ... other iter operations
+    whsafe_iter_destroy(iter);
+    // ... do something
+    // must destroy iterators before unref()
+    wormhole_unref(ref);
+
+### The `wormhole` API
+Similar to `whsafe`, `wormhole` is also thread safe. It's often faster than `whsafe` but requires extra caution when using it.
+
+An example of using point-query operations using the `wormhole` API.
 
     index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
     ref = wormhole_ref(index);
@@ -90,7 +143,34 @@ A thread needs to hold a reference of the index (_wormref_) to perform safe inde
     wormhole_unref(ref);
     wormhole_destroy(index);
 
-### Avoid blocking writers
+An example of range-query operations:
+
+    ref = wormhole_ref(index);
+    // ... assume we already have a valid ref
+    iter = wormhole_iter_create(ref);
+    for (...) {
+      wormhole_iter_seek(iter, key);
+      wormhole_iter_peek(iter, buf);
+      wormhole_iter_skip(iter, 1);
+      wormhole_iter_peek(iter, buf);
+      wormhole_iter_skip(iter, 3);
+      wormhole_iter_inp(iter, uf, priv);
+      // other iter operations
+    }
+    // An active iterator is likely holding a lock.
+    wormhole_iter_park(iter); // Release resources to avoid blocking other threads
+    while (condition not met) { // See below for explanation
+        wormhole_refresh_qstate(ref);
+    }
+    // ... start using the iterator again
+    wormhole_iter_seek(iter, key2);
+    // ... other iter operations
+    wormhole_iter_destroy(iter);
+    // ... do something
+    // must destroy iterators before unref()
+    wormhole_unref(ref);
+
+### Avoid blocking writers when using the `wormhole` API
 Wormhole internally uses QSBR RCU to synchronize readers/writers so every holder of a reference (`ref`)
 needs to actively perform index operations.
 An ref-holder, if not actively performing index operations, may block a writer thread that is performing split/merge operations.
@@ -100,9 +180,9 @@ it is recommended that the holder temporarily releases the `ref` before entering
 and obtains a new `ref` before performing the next index operation.
 
     // holding a ref
-    wormhole_unref(ref);
+    wormhole_unref(ref);  // warning: this can slowdown your program
     sleep(10);
-    ref = wormhole_ref(map);
+    ref = wormhole_ref(map);  // warning: this can slowdown your program
     // perform index operations with (the new) ref
 
 However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
@@ -122,8 +202,9 @@ A common scenario of dead-locking is when acquiring locks while holding a wormho
         wormhole_refresh_qstate(ref);
     }
 
+The above issues with QSBR are all gone with `whsafe`.
 
-### The thread-unsafe API
+### The `whunsafe` API
 A set of *thread-unsafe* functions are also provided. See the functions with _prefix_ `whunsafe`.
 The thread-unsafe functions don't use the reference (_wormref_).
 Simply feed them with the pointer to the wormhole index:
@@ -180,6 +261,17 @@ The inplace function can also be used to retrieve key-value data. For example:
     struct kref kref = ...
     u64 val;
     wormhole_inp(ref, &kref, inplace_getu64, &val);
+
+### `merge`: atomic Read-Modify-Write
+The `wormhole_merge` and `whsafe_merge` functions perform atomic Read-Modify-Write (RMW) operations.
+In a RMW operation, if the search key is found, the KV pair will be passed to a user-defined callback function `uf` (short for user function).
+Otherwise, a NULL pointer is passed to `uf`.
+`uf` could update the KV in-place if it does not require any memory reallocation.
+In such a case, `uf` should return the KV's pointer back and the merge function will do nothing else.
+If `uf` want to replace the KV with something new, it should return a pointer that is different than the original KV pointer.
+The `uf` should not make memory allocation by itself.
+Instead, the `merge` function will copy the returned KV and replace the existing KV with the newly created one.
+`uf` should not return NULL unless the key was not found.
 
 ### Iterator
 The `wormhole_iter_{seek,peek,skip,next,inp}` functions provide range-search functionalities.
