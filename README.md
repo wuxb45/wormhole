@@ -8,7 +8,7 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
 ## NEWS
-* The `whsafe` API is a *worry-free* thread-safe wormhole API. At a small performance cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
+* The `whsafe` API is a *worry-free* thread-safe wormhole API. At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
 * `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
 
 ## Highlights:
