@@ -229,6 +229,7 @@ kvmap_mm_free_free(struct kv * const kv, void * const priv);
 
 // use malloc/free to copy kv
 extern const struct kvmap_mm kvmap_mm_dup; // the default mm
+extern const struct kvmap_mm kvmap_mm_ndf; // ndf
 
 // ref {{{
 typedef int (*kref_kv_cmp_func)(const struct kref *, const struct kv *);

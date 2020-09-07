@@ -647,6 +647,14 @@ const struct kvmap_mm kvmap_mm_dup = {
   .free = kvmap_mm_free_free,
   .priv = NULL,
 };
+
+const struct kvmap_mm kvmap_mm_ndf = {
+  .in = kvmap_mm_in_noop,
+  .out = kvmap_mm_out_dup,
+  .free = kvmap_mm_free_free,
+  .priv = NULL,
+};
+
 // }}} mm
 
 // ref {{{
