@@ -46,7 +46,7 @@ struct kv {
       u32 hashhi;
     };
   };
-  u8 kv[];  // len(kv) == klen + vlen
+  u8 kv[0];  // len(kv) == klen + vlen
 } __attribute__((packed));
 
 struct kref {
@@ -158,6 +158,9 @@ kv_match(const struct kv * const key1, const struct kv * const key2);
   extern bool
 kv_match_full(const struct kv * const kv1, const struct kv * const kv2);
 
+  extern bool
+kv_match_kv128(const struct kv * const sk, const u8 * const kv128);
+
   extern int
 kv_compare(const struct kv * const kv1, const struct kv * const kv2);
 
@@ -227,9 +230,9 @@ kvmap_mm_out_dup(struct kv * const kv, struct kv * const out);
   extern void
 kvmap_mm_free_free(struct kv * const kv, void * const priv);
 
-// use malloc/free to copy kv
-extern const struct kvmap_mm kvmap_mm_dup; // the default mm
-extern const struct kvmap_mm kvmap_mm_ndf; // ndf
+// the default mm
+extern const struct kvmap_mm kvmap_mm_dup; // in:Dup, out:Dup, free:Free
+extern const struct kvmap_mm kvmap_mm_ndf; // in:Noop, out:Dup, free:Free
 
 // ref {{{
 typedef int (*kref_kv_cmp_func)(const struct kref *, const struct kv *);
@@ -249,6 +252,9 @@ kref_update_hash32(struct kref * const kref);
 kref_ref_kv(struct kref * const kref, const struct kv * const kv);
 
   extern bool
+kref_match(const struct kref * const k1, const struct kref * const k2);
+
+  extern bool
 kref_kv_match(const struct kref * const kref, const struct kv * const k);
 
   extern int
@@ -256,6 +262,9 @@ kref_compare(const struct kref * const kref1, const struct kref * const kref2);
 
   extern int
 kref_kv_compare(const struct kref * const kref, const struct kv * const k);
+
+  extern u32
+kref_lcp(const struct kref * const k1, const struct kref * const k2);
 
   extern int
 kref_k128_compare(const struct kref * const sk, const u8 * const k128);
@@ -272,6 +281,20 @@ kvref_ref_kv(struct kvref * const ref, struct kv * const kv);
   extern struct kv *
 kvref_dup2_kv(struct kvref * const ref, struct kv * const to);
 // }}} ref
+
+// kv128 {{{
+  extern size_t
+kv128_estimate_kv(const struct kv * const kv);
+
+  extern u8 *
+kv128_encode_kv(const struct kv * const kv, u8 * const out, size_t * const pesize);
+
+  extern struct kv *
+kv128_decode_kv(const u8 * const ptr, struct kv * const out, size_t * const pesize);
+
+  extern size_t
+kv128_size(const u8 * const ptr);
+// }}} kv128
 
 // }}} kv
 
@@ -319,7 +342,7 @@ struct kvmap_api {
   u64         (* delr)    (void * const ref, const struct kref * const start, const struct kref * const end);
 
   // for thread-safe iter: it is assumed the key under the current cursor is freezed/immutable
-  // create iterator from a ref
+  // create iterator from a ref; must call iter_seek to make it valid
   void *      (* iter_create)  (void * const ref);
   // move the cursor to the first key >= search-key;
   void        (* iter_seek)    (void * const iter, const struct kref * const key);
@@ -332,8 +355,12 @@ struct kvmap_api {
   bool        (* iter_kref)    (void * const iter, struct kref * const kref);
   // similar to iter_kref but also provide the value
   bool        (* iter_kvref)   (void * const iter, struct kvref * const kvref);
+  // iter_retain makes kref or kvref of the current iter remain valid until released
+  // the returned opaque pointer should be provided when releasing the hold
+  u64         (* iter_retain)  (void * const iter);
+  void        (* iter_release) (void * const iter, const u64 opaque);
   // move the cursor to the next key
-  void        (* iter_skip)    (void * const iter, const u64 nr);
+  void        (* iter_skip)    (void * const iter, const u32 nr);
   // iter_next == iter_peek + iter_skip
   struct kv * (* iter_next)    (void * const iter, struct kv * const out);
   // perform inplace opeation if the current key is valid; return false if no current key
@@ -366,6 +393,30 @@ struct kvmap_api {
   // for debugging
   void        (* fprint)  (void * map, FILE * const out);
 };
+
+// registry
+struct kvmap_api_reg {
+  int nargs; // number of arguments after name
+  const char * name;
+  const char * args_msg; // see ...helper_message
+  // multiple apis may share one create function
+  // arguments: name (e.g., "rdb"), mm (usually NULL), the remaining args
+  void * (*create)(const char *, const struct kvmap_mm *, char **);
+  const struct kvmap_api * api;
+};
+
+// call this function to register a kvmap_api
+  extern void
+kvmap_api_register(const int nargs, const char * const name, const char * const args_msg,
+    void * (*create)(const char *, const struct kvmap_mm *, char **), const struct kvmap_api * const api);
+
+  extern void
+kvmap_api_helper_message(void);
+
+  extern int
+kvmap_api_helper(int argc, char ** const argv,
+    const struct kvmap_mm * const mm, const bool map_locking,
+    const struct kvmap_api ** const api_out, void ** const map_out);
 // }}} kvmap_api
 
 // helpers {{{
@@ -500,7 +551,7 @@ wormhole_iter_kref(struct wormhole_iter * const iter, struct kref * const kref);
 wormhole_iter_kvref(struct wormhole_iter * const iter, struct kvref * const kvref);
 
   extern void
-wormhole_iter_skip(struct wormhole_iter * const iter, const u64 nr);
+wormhole_iter_skip(struct wormhole_iter * const iter, const u32 nr);
 
   extern struct kv *
 wormhole_iter_next(struct wormhole_iter * const iter, struct kv * const out);
@@ -634,7 +685,7 @@ whunsafe_iter_valid(struct wormhole_iter * const iter);
 // unsafe kref: use wormhole_iter_kref
 
   extern void
-whunsafe_iter_skip(struct wormhole_iter * const iter, const u64 nr);
+whunsafe_iter_skip(struct wormhole_iter * const iter, const u32 nr);
 
   extern struct kv *
 whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out);
@@ -648,34 +699,10 @@ whunsafe_iter_destroy(struct wormhole_iter * const iter);
   extern void
 wormhole_fprint(struct wormhole * const map, FILE * const out);
 
-// }}} wormhole
-
-// kvmap_api {{{
 extern const struct kvmap_api kvmap_api_wormhole;
 extern const struct kvmap_api kvmap_api_whsafe;
 extern const struct kvmap_api kvmap_api_whunsafe;
-
-struct kvmap_api_reg {
-  int nargs; // number of arguments after name
-  const char * name;
-  const char * args_msg; // see ...helper_message
-  // multiple apis may share one create function
-  // arguments: name (e.g., "rdb"), mm (usually NULL), the remaining args
-  void * (*create)(const char *, const struct kvmap_mm *, char **);
-  const struct kvmap_api * api;
-};
-
-  extern void
-kvmap_api_register(const struct kvmap_api_reg * const reg);
-
-  extern void
-kvmap_api_helper_message(void);
-
-  extern int
-kvmap_api_helper(int argc, char ** const argv,
-    const struct kvmap_mm * const mm, const bool map_locking,
-    const struct kvmap_api ** const api_out, void ** const map_out);
-// }}} kvmap_api
+// }}} wormhole
 
 #ifdef __cplusplus
 }

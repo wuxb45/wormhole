@@ -17,6 +17,9 @@
 #include <sys/socket.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#if defined(__linux__)
+#include <linux/fs.h>
+#endif
 #include <time.h>
 #if defined(__FreeBSD__)
 #include <pthread_np.h>
@@ -136,16 +139,27 @@ cpu_cfence(void)
 }
 
   inline void
-cpu_prefetchr(const void * const ptr, const int hint)
+cpu_prefetch0(const void * const ptr)
 {
-  // will be reduced by optimization
-  switch (hint) {
-  case 0: __builtin_prefetch(ptr, 0, 0); break;
-  case 1: __builtin_prefetch(ptr, 0, 1); break;
-  case 2: __builtin_prefetch(ptr, 0, 2); break;
-  case 3: __builtin_prefetch(ptr, 0, 3); break;
-  default: break;
-  }
+  __builtin_prefetch(ptr, 0, 0);
+}
+
+  inline void
+cpu_prefetch1(const void * const ptr)
+{
+  __builtin_prefetch(ptr, 0, 1);
+}
+
+  inline void
+cpu_prefetch2(const void * const ptr)
+{
+  __builtin_prefetch(ptr, 0, 2);
+}
+
+  inline void
+cpu_prefetch3(const void * const ptr)
+{
+  __builtin_prefetch(ptr, 0, 3);
 }
 
   inline void
@@ -600,6 +614,15 @@ pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out)
 static u32 process_ncpu;
 #if defined(__FreeBSD__)
 typedef cpuset_t cpu_set_t;
+#elif defined(__APPLE__) && defined(__MACH__)
+typedef u64 cpu_set_t;
+#define CPU_SETSIZE ((64))
+#define CPU_COUNT(__cpu_ptr__) (__builtin_popcount(*__cpu_ptr__))
+#define CPU_ISSET(__cpu_idx__, __cpu_ptr__) (((*__cpu_ptr__) >> __cpu_idx__) & 1lu)
+#define CPU_ZERO(__cpu_ptr__) ((*__cpu_ptr__) = 0)
+#define CPU_SET(__cpu_idx__, __cpu_ptr__) ((*__cpu_ptr__) |= (1lu << __cpu_idx__))
+#define CPU_CLR(__cpu_idx__, __cpu_ptr__) ((*__cpu_ptr__) &= ~(1lu << __cpu_idx__))
+#define pthread_attr_setaffinity_np(...) ((void)0)
 #endif
 
 __attribute__((constructor))
@@ -623,6 +646,9 @@ thread_getaffinity_set(cpu_set_t * const cpuset)
   return sched_getaffinity(0, sizeof(*cpuset), cpuset);
 #elif defined(__FreeBSD__)
   return cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(*cpuset), cpuset);
+#elif defined(__APPLE__) && defined(__MACH__)
+  *cpuset = (1lu << process_ncpu) - 1;
+  return (int)process_ncpu; // TODO
 #endif
 }
 
@@ -633,6 +659,9 @@ thread_setaffinity_set(const cpu_set_t * const cpuset)
   return sched_setaffinity(0, sizeof(*cpuset), cpuset);
 #elif defined(__FreeBSD__)
   return cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(*cpuset), cpuset);
+#elif defined(__APPLE__) && defined(__MACH__)
+  (void)cpuset; // TODO
+  return 0;
 #endif
 }
 
@@ -643,6 +672,10 @@ thread_get_name(const pthread_t pt, char * const name, const size_t len)
   pthread_getname_np(pt, name, len);
 #elif defined(__FreeBSD__)
   pthread_get_name_np(pt, name, len);
+#elif defined(__APPLE__) && defined(__MACH__)
+  (void)pt;
+  (void)len;
+  strcpy(name, "unknown"); // TODO
 #endif
 }
 
@@ -653,6 +686,9 @@ thread_set_name(const pthread_t pt, const char * const name)
   pthread_setname_np(pt, name);
 #elif defined(__FreeBSD__)
   pthread_set_name_np(pt, name);
+#elif defined(__APPLE__) && defined(__MACH__)
+  (void)pt;
+  (void)name; // TODO
 #endif
 }
 
@@ -907,7 +943,7 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 // spinlock {{{
 #if defined(__linux__)
 static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
-#elif defined(__FreeBSD__)
+#else
 static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
 #endif
 
@@ -917,10 +953,10 @@ spinlock_init(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_init(p, PTHREAD_PROCESS_PRIVATE);
-#elif defined(__FreeBSD__)
+#else
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
-#endif
+#endif // __linux__
 }
 
   inline void
@@ -934,7 +970,7 @@ spinlock_lock(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_lock(p); // return value ignored
-#elif defined(__FreeBSD__)
+#else
   au32 * const p = (typeof(p))lock;
   do {
     if (atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0)
@@ -943,7 +979,7 @@ spinlock_lock(spinlock * const lock)
       cpu_pause();
     } while (atomic_load_explicit(p, MO_CONSUME));
   } while (true);
-#endif // __FreeBSD__
+#endif // __linux__
 #endif // CORR
 }
 
@@ -953,10 +989,10 @@ spinlock_trylock(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   return !pthread_spin_trylock(p);
-#elif defined(__FreeBSD__)
+#else
   au32 * const p = (typeof(p))lock;
   return atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0;
-#endif // __FreeBSD__
+#endif // __linux__
 }
 
   inline void
@@ -965,10 +1001,10 @@ spinlock_unlock(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_unlock(p); // return value ignored
-#elif defined(__FreeBSD__)
+#else
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
-#endif // __FreeBSD__
+#endif // __linux__
 }
 // }}} spinlock
 
@@ -1009,6 +1045,92 @@ mutex_unlock(mutex * const lock)
 }
 // }}} pthread mutex
 
+// rwdep {{{
+// poor man's lockdep for rwlock
+// per-thread lock list
+#ifdef RWDEP
+#define RWDEP_NR ((16))
+__thread const rwlock * rwdep_readers[RWDEP_NR] = {};
+__thread const rwlock * rwdep_writers[RWDEP_NR] = {};
+
+  static void
+rwdep_check(const rwlock * const lock)
+{
+  debug_assert(lock);
+  for (u64 i = 0; i < RWDEP_NR; i++) {
+    if (rwdep_readers[i] == lock)
+      debug_die();
+    if (rwdep_writers[i] == lock)
+      debug_die();
+  }
+}
+#endif // RWDEP
+
+  static void
+rwdep_lock_read(const rwlock * const lock)
+{
+#ifdef RWDEP
+  rwdep_check(lock);
+  for (u64 i = 0; i < RWDEP_NR; i++) {
+    if (rwdep_readers[i] == NULL) {
+      rwdep_readers[i] = lock;
+      return;
+    }
+  }
+#else
+  (void)lock;
+#endif // RWDEP
+}
+
+  static void
+rwdep_unlock_read(const rwlock * const lock)
+{
+#ifdef RWDEP
+  for (u64 i = 0; i < RWDEP_NR; i++) {
+    if (rwdep_readers[i] == lock) {
+      rwdep_readers[i] = NULL;
+      return;
+    }
+  }
+  debug_die();
+#else
+  (void)lock;
+#endif // RWDEP
+}
+
+  static void
+rwdep_lock_write(const rwlock * const lock)
+{
+#ifdef RWDEP
+  rwdep_check(lock);
+  for (u64 i = 0; i < RWDEP_NR; i++) {
+    if (rwdep_writers[i] == NULL) {
+      rwdep_writers[i] = lock;
+      return;
+    }
+  }
+#else
+  (void)lock;
+#endif // RWDEP
+}
+
+  static void
+rwdep_unlock_write(const rwlock * const lock)
+{
+#ifdef RWDEP
+  for (u64 i = 0; i < RWDEP_NR; i++) {
+    if (rwdep_writers[i] == lock) {
+      rwdep_writers[i] = NULL;
+      return;
+    }
+  }
+  debug_die();
+#else
+  (void)lock;
+#endif // RWDEP
+}
+// }}} rwlockdep
+
 // rwlock {{{
 typedef au32 lock_t;
 typedef u32 lock_v;
@@ -1030,6 +1152,7 @@ rwlock_trylock_read(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   if ((atomic_fetch_add_explicit(pvar, 1, MO_ACQUIRE) >> RWLOCK_WSHIFT) == 0) {
+    rwdep_lock_read(lock);
     return true;
   } else {
     atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
@@ -1053,14 +1176,18 @@ rwlock_trylock_read_lp(rwlock * const lock)
 rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
 {
   lock_t * const pvar = (typeof(pvar))lock;
-  if ((atomic_fetch_add_explicit(pvar, 1, MO_ACQUIRE) >> RWLOCK_WSHIFT) == 0)
+  if ((atomic_fetch_add_explicit(pvar, 1, MO_ACQUIRE) >> RWLOCK_WSHIFT) == 0) {
+    rwdep_lock_read(lock);
     return true;
+  }
 
 #pragma nounroll
   do { // someone already locked; wait for a little while
     cpu_pause();
-    if ((atomic_load_explicit(pvar, MO_CONSUME) >> RWLOCK_WSHIFT) == 0)
+    if ((atomic_load_explicit(pvar, MO_CONSUME) >> RWLOCK_WSHIFT) == 0) {
+      rwdep_lock_read(lock);
       return true;
+    }
   } while (nr--);
 
   atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
@@ -1089,6 +1216,7 @@ rwlock_lock_read(rwlock * const lock)
   inline void
 rwlock_unlock_read(rwlock * const lock)
 {
+  rwdep_unlock_read(lock);
   lock_t * const pvar = (typeof(pvar))lock;
   atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
 }
@@ -1098,7 +1226,12 @@ rwlock_trylock_write(rwlock * const lock)
 {
   lock_t * const pvar = (typeof(pvar))lock;
   lock_v v0 = atomic_load_explicit(pvar, MO_CONSUME);
-  return (v0 == 0) && atomic_compare_exchange_weak_explicit(pvar, &v0, RWLOCK_WBIT, MO_ACQUIRE, MO_RELAXED);
+  if ((v0 == 0) && atomic_compare_exchange_weak_explicit(pvar, &v0, RWLOCK_WBIT, MO_ACQUIRE, MO_RELAXED)) {
+    rwdep_lock_write(lock);
+    return true;
+  } else {
+    return false;
+  }
 }
 
 // actually nr + 1
@@ -1142,6 +1275,7 @@ rwlock_trylock_write_hp(rwlock * const lock)
     return false;
 
   if (atomic_compare_exchange_weak_explicit(pvar, &v0, v0|RWLOCK_WBIT, MO_ACQUIRE, MO_RELAXED)) {
+    rwdep_lock_write(lock);
     // WBIT successfully marked; must wait for readers to leave
     if (v0) { // saw active readers
 #pragma nounroll
@@ -1187,6 +1321,7 @@ rwlock_lock_write_hp(rwlock * const lock)
   inline void
 rwlock_unlock_write(rwlock * const lock)
 {
+  rwdep_unlock_write(lock);
   lock_t * const pvar = (typeof(pvar))lock;
   atomic_fetch_sub_explicit(pvar, RWLOCK_WBIT, MO_RELEASE);
 }
@@ -1194,6 +1329,8 @@ rwlock_unlock_write(rwlock * const lock)
   inline void
 rwlock_write_to_read(rwlock * const lock)
 {
+  rwdep_unlock_write(lock);
+  rwdep_lock_read(lock);
   lock_t * const pvar = (typeof(pvar))lock;
   // +R -W
   atomic_fetch_add_explicit(pvar, ((lock_v)1) - RWLOCK_WBIT, MO_ACQ_REL);
@@ -1214,10 +1351,17 @@ rwlock_write_to_read(rwlock * const lock)
 
 // for switch/exit: pass a return value to the target
 asm (
+    ".align 16;"
+#if defined(__linux__) || defined(__FreeBSD__)
     ".global co_switch_stack;"
     ".type co_switch_stack, @function;"
-    ".align 16;"
     "co_switch_stack:"
+#elif defined(__APPLE__) && defined(__MACH__)
+    ".global _co_switch_stack;"
+    "_co_switch_stack:"
+#else
+#error supported platforms: Linux/FreeBSD/Apple
+#endif // OS
     "push %rbp; push %rbx; push %r12;"
     "push %r13; push %r14; push %r15;"
     "mov  %rsp, (%rdi);"
@@ -1232,10 +1376,17 @@ asm (
 // number pushes in co_switch_stack
 #define CO_CONTEXT_SIZE ((20))
 asm (
+    ".align 16;"
+#if defined(__linux__) || defined(__FreeBSD__)
     ".global co_switch_stack;"
     ".type co_switch_stack, @function;"
-    ".align 16;"
     "co_switch_stack:"
+#elif defined(__APPLE__) && defined(__MACH__)
+    ".global _co_switch_stack;"
+    "_co_switch_stack:"
+#else
+#error supported platforms: Linux/FreeBSD/Apple
+#endif // OS
     "sub  x8, sp, 160;"
     "str  x8, [x0];"
     "stp x30, x19, [x8];      ldp x30, x19, [x1];"
@@ -1255,10 +1406,17 @@ asm (
 
 extern void co_entry_aarch64(void);
 asm (
+    ".align 16;"
+#if defined(__linux__) || defined(__FreeBSD__)
     ".global co_entry_aarch64;"
     ".type co_entry_aarch64, @function;"
-    ".align 16;"
     "co_entry_aarch64:"
+#elif defined(__APPLE__) && defined(__MACH__)
+    ".global _co_entry_aarch64;"
+    "_co_entry_aarch64:"
+#else
+#error supported platforms: Linux/FreeBSD/Apple
+#endif // OS
     "ldr x8, [sp, 0];"
     "blr x8;"
     "ldr x8, [sp, 8];"
@@ -1267,7 +1425,7 @@ asm (
     "blr x8;"
     );
 #else
-#error x86_64 or AArch64 required.
+#error supported CPUs: x86_64 or AArch64
 #endif // co_switch_stack x86_64 and aarch64
 // }}} asm
 
@@ -1320,9 +1478,9 @@ co_create(const u64 stacksize, void * func, void * priv, u64 * const host)
   if (mem == NULL)
     return NULL;
 
-#ifdef COSTACKCHECK
+#ifdef CO_STACK_CHECK
   memset(mem, 0x5c, stksz);
-#endif
+#endif // CO_STACK_CHECK
 
   struct co * const co = (typeof(co))(mem + stksz);
   co_init(co, func, priv, host, stksz, co_exit0);
@@ -1385,12 +1543,32 @@ co_back(const u64 retval)
   return co_switch_stack(&(save->rsp), *(save->host), retval);
 }
 
+#ifdef CO_STACK_CHECK
+  static void
+co_stack_check(const u8 * const mem, const u64 stksz)
+{
+  const u64 * const mem64 = (typeof(mem64))mem;
+  const u64 size64 = stksz / sizeof(u64);
+  for (u64 i = 0; i < size64; i++) {
+    if (mem64[i] != 0x5c5c5c5c5c5c5c5clu) {
+      fprintf(stderr, "%s co stack usage: %lu/%lu\n", __func__, stksz - (i * sizeof(u64)), stksz);
+      break;
+    }
+  }
+}
+#endif // CO_STACK_CHECK
+
 // return to host and set host to NULL
 __attribute__((noreturn))
   void
 co_exit(const u64 retval)
 {
   debug_assert(co_curr);
+#ifdef CO_STACK_CHECK
+  const u64 stksz = co_curr->stksz;
+  u8 * const mem = ((u8 *)co_curr) - stksz;
+  co_stack_check(mem, stksz);
+#endif // CO_STACK_CHECK
   const u64 hostrsp = *(co_curr->host);
   co_curr->host = NULL;
   struct co * const save = co_curr;
@@ -1439,9 +1617,9 @@ corr_create(const u64 stacksize, void * func, void * priv, u64 * const host)
   if (mem == NULL)
     return NULL;
 
-#ifdef COSTACKCHECK
+#ifdef CO_STACK_CHECK
   memset(mem, 0x5c, stksz);
-#endif
+#endif // CO_STACK_CHECK
 
   struct corr * const co = (typeof(co))(mem + stksz);
   co_init(&(co->co), func, priv, host, stksz, corr_exit);
@@ -1459,9 +1637,9 @@ corr_link(const u64 stacksize, void * func, void * priv, struct corr * const pre
   if (mem == NULL)
     return NULL;
 
-#ifdef COSTACKCHECK
+#ifdef CO_STACK_CHECK
   memset(mem, 0x5c, stksz);
-#endif
+#endif // CO_STACK_CHECK
 
   struct corr * const co = (typeof(co))(mem + stksz);
   co_init(&(co->co), func, priv, prev->co.host, stksz, corr_exit);
@@ -1509,13 +1687,11 @@ __attribute__((noreturn))
 corr_exit(void)
 {
   debug_assert(co_curr);
-#ifdef COSTACKCHECK
-  u8 * ptr = ((u8 *)(co_curr)) - co_curr->stksz;
-  while ((*ptr) == 0x5c)
-    ptr++;
-  const u64 used = ((u8 *)co_curr) - ptr;
-  fprintf(stderr, "%s stack usage %lu\n", __func__, used);
-#endif
+#ifdef CO_STACK_CHECK
+  const u64 stksz = co_curr->stksz;
+  const u8 * const mem = ((u8 *)(co_curr)) - stksz;
+  co_stack_check(mem, stksz);
+#endif // CO_STACK_CHECK
 
   struct corr * const curr = (typeof(curr))co_curr;
   if (curr->next != curr) { // have more corr
@@ -1682,23 +1858,29 @@ vi128_encode_u32(u8 * dst, u32 v)
   //}
   //*(dst++) = (u8)v;
 
+#if defined(__GNUC__) && __GNUC__ >= 7
+#define FALLTHROUGH __attribute__ ((fallthrough))
+#else
+#define FALLTHROUGH ((void)0)
+#endif /* __GNUC__ >= 7 */
+
   switch (vi128_estimate_u32(v)) {
   case 5:
     *(dst++) = (u8)(v | 0x80);
     v >>= 7;
-    __attribute__((fallthrough));
+    FALLTHROUGH;
   case 4:
     *(dst++) = (u8)(v | 0x80);
     v >>= 7;
-    __attribute__((fallthrough));
+    FALLTHROUGH;
   case 3:
     *(dst++) = (u8)(v | 0x80);
     v >>= 7;
-    __attribute__((fallthrough));
+    FALLTHROUGH;
   case 2:
     *(dst++) = (u8)(v | 0x80);
     v >>= 7;
-    __attribute__((fallthrough));
+    FALLTHROUGH;
   case 1:
     *(dst++) = (u8)v;
     break;
@@ -1707,6 +1889,7 @@ vi128_encode_u32(u8 * dst, u32 v)
     break;
   }
   return dst;
+#undef FALLTHROUGH
 }
 
 // return ptr after the consumed bytes
@@ -1742,6 +1925,57 @@ vi128_decode_u32(const u8 * src, u32 * const out)
   return NULL; // invalid
 }
 // }}} bits
+
+// misc {{{
+  inline size_t
+fdsize(const int fd)
+{
+  struct stat st;
+  st.st_size = 0;
+  if (fstat(fd, &st) != 0)
+    return 0;
+
+  if (S_ISBLK(st.st_mode))
+    ioctl(fd, BLKGETSIZE64, &st.st_size);
+
+  return st.st_size;
+}
+
+  u32
+memlcp(const u8 * p1, const u8 * p2, const u32 max)
+{
+  const u32 max64 = max >> 3 << 3;
+  u32 clen = 0;
+  while (clen < max64) {
+    const u64 v1 = *(const u64 *)p1;
+    const u64 v2 = *(const u64 *)p2;
+    if (v1 != v2)
+      return clen + (u32)(__builtin_ctzl(v1 ^ v2) >> 3);
+
+    clen += sizeof(u64);
+    p1 += sizeof(u64);
+    p2 += sizeof(u64);
+  }
+
+  if ((clen + sizeof(u32)) <= max) {
+    const u32 v1 = *(const u32 *)p1;
+    const u32 v2 = *(const u32 *)p2;
+    if (v1 != v2)
+      return clen + (u32)(__builtin_ctz(v1 ^ v2) >> 3);
+
+    clen += sizeof(u32);
+    p1 += sizeof(u32);
+    p2 += sizeof(u32);
+  }
+
+  while ((clen < max) && (*p1 == *p2)) {
+    clen++;
+    p1++;
+    p2++;
+  }
+  return clen;
+}
+// }}} misc
 
 // bitmap {{{
 // Partially thread-safe bitmap; call it Eventual Consistency?
@@ -1802,6 +2036,18 @@ bitmap_set0(struct bitmap * const bm, const u64 idx)
 bitmap_count(struct bitmap * const bm)
 {
   return bm->ones;
+}
+
+  inline u64
+bitmap_first(struct bitmap * const bm)
+{
+  debug_assert(bm->ones);
+  for (u64 i = 0; (i << 6) < bm->bits; i++) {
+    if (bm->bm[i])
+      return (i << 6) + __builtin_ctzl(bm->bm[i]);
+  }
+
+  debug_die();
 }
 
   inline void
@@ -1887,6 +2133,60 @@ bf_destroy(struct bf * const bf)
 }
 // }}} bloom filter
 
+// oalloc {{{
+struct oalloc {
+  union {
+    void * mem;
+    void ** ptr;
+  };
+  size_t blksz;
+  size_t curr;
+};
+
+  struct oalloc *
+oalloc_create(const size_t blksz)
+{
+  struct oalloc * const o = malloc(sizeof(*o));
+  o->mem = malloc(blksz);
+  o->blksz = blksz;
+  *(o->ptr) = NULL;
+  o->curr = sizeof(void *);
+  return o;
+}
+
+  void *
+oalloc_alloc(struct oalloc * const o, const size_t size)
+{
+  if ((o->curr + size) <= o->blksz) {
+    void * ret = o->mem + o->curr;
+    o->curr += size;
+    return ret;
+  }
+
+  // too large
+  if ((size + sizeof(void *)) > o->blksz)
+    return NULL;
+
+  // need more core
+  void ** const newmem = malloc(o->blksz);
+  *newmem = o->mem;
+  o->ptr = newmem;
+  o->curr = sizeof(void *);
+  return oalloc_alloc(o, size);
+}
+
+  void
+oalloc_destroy(struct oalloc * const o)
+{
+  while (o->mem) {
+    void * const next = *(o->ptr);
+    free(o->mem);
+    o->mem = next;
+  }
+  free(o);
+}
+// }}} oalloc
+
 // slab {{{
 #define SLAB_OBJ0_OFFSET ((64))
 struct slab_object {
@@ -1920,7 +2220,7 @@ slab_push_safe(struct slab * const slab, struct slab_object * const obj_head,
     u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);;
     obj_last->next = (void *)(m0 >> 16);
     const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
-    if (atomic_compare_exchange_weak(&slab->magic, &m0, m1))
+    if (atomic_compare_exchange_weak_explicit(&slab->magic, &m0, m1, MO_RELEASE, MO_RELAXED))
       return;
   } while (true);
 }
@@ -2204,7 +2504,7 @@ compare_u64(const void * const p1, const void * const p2)
   const u64 v1 = *((const u64 *)p1);
   const u64 v2 = *((const u64 *)p2);
   const u64 diff = v1 - v2;
-  int ret = ((int)(diff >> 32)) | __builtin_popcountl(diff);
+  const int ret = ((int)(diff >> 32)) | __builtin_popcountl(diff);
   return ret;
 }
 
@@ -3389,7 +3689,6 @@ rgen_new_trace32(const char * const filename, const u64 bufsize)
     free(gi);
     return NULL;
   }
-  posix_fadvise(fileno(pt->fin), 0, 0, POSIX_FADV_SEQUENTIAL);
   gi->type = GEN_TRACE32;
   gi->max = ~0lu;
   rgen_set_next(gi, gen_trace32);
@@ -3667,7 +3966,6 @@ rgen_fork(struct rgen * const gen0)
   memcpy(gen, gen0, sizeof(*gen));
   if (gen->type == GEN_TRACE32) {
     FILE * const f2 = fdopen(dup(fileno(gen0->trace32.fin)), "rb");
-    posix_fadvise(fileno(f2), 0, 0, POSIX_FADV_SEQUENTIAL);
     gen->trace32.fin = f2;
     gen->trace32.idx = 0;
     gen->trace32.avail = 0;
@@ -3917,7 +4215,7 @@ struct qsbr_ref_real {
 #define QSBR_DEBUG_BTNR ((14))
   void * backtrace[QSBR_DEBUG_BTNR];
 #endif
-  au64 qstate; // user updates it
+  volatile au64 qstate; // user updates it
   struct qsbr_ref_real * volatile * pptr; // internal only
   struct qsbr_ref_real * park;
 };
@@ -4408,7 +4706,11 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
   }
 
   bool done = false;
+  FILE * fout[2] = {stdout, stderr};
+  const u32 printnr = isatty(fileno(stderr)) ? 1 : 2; // when stderr is not a tty, also print to stderr
   struct vctr * const va = vctr_create(pi->vctr_size + forker_papi_nr);
+  struct vctr * const vas = vctr_create(pi->vctr_size + forker_papi_nr);
+  u64 dts = 0;
   const u64 t0 = time_nsec();
   // until: repeat times, or done determined by damp
   for (u32 r = 0; repeat ? (r < repeat) : (done == false); r++) {
@@ -4435,25 +4737,34 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
     const u64 dt = thread_fork_join(cc, pi->wf, true, (void **)wis);
 #endif
     debug_perf_switch();
-
+    dts += dt;
     const long rs1 = process_get_rss();
-    fprintf(stderr, "rss_kb %+ld ", rs1 - rs0);
 
     vctr_reset(va);
     for (u64 i = 0; i < cc; i++)
       vctr_merge(va, wis[i]->vctr);
-    done = pi->af(dt, va, damp, out);
+    vctr_merge(vas, va); // total
 
-    // stderr messages
-    fprintf(stderr, " try %u %.2lf %.2lf ", r, ((double)dt1) * 1e-9, ((double)dt) * 1e-9);
+    done = pi->af(dt, va, damp, out);
+    for (u32 i = 0; i < printnr; i++) {
+      fprintf(fout[i], "rss_kb %+ld r %u %.2lf %.2lf ", rs1 - rs0, r, ((double)dt1) * 1e-9, ((double)dt) * 1e-9);
 #ifdef FORKER_PAPI
-    forker_papi_print(stderr, va, pi->vctr_size);
-#endif
-    forker_pass_print(stderr, pref, PASS_NR_ARGS + nr_wargs, argv, out);
+      forker_papi_print(fout[i], va, pi->vctr_size);
+#endif // FORKER_PAPI
+      forker_pass_print(fout[i], pref, PASS_NR_ARGS + nr_wargs, argv, out);
+    }
+  }
+
+  damp_clean(damp);
+  pi->af(dts, vas, damp, out);
+  for (u32 i = 0; i < printnr; i++) {
+    fprintf(fout[i], "total %.2lf ", ((double)dts) * 1e-9);
+    forker_pass_print(fout[i], pref, PASS_NR_ARGS + nr_wargs, argv, out);
   }
 
   // clean up
   vctr_destroy(va);
+  vctr_destroy(vas);
   damp_destroy(damp);
   for (u64 i = 0; i < cc; i++) {
     if (wis[i]->gen_back) {
@@ -4467,7 +4778,6 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
   free(wis);
 
   // done messages
-  forker_pass_print(stdout, pref, PASS_NR_ARGS + nr_wargs, argv, out);
   return PASS_NR_ARGS + nr_wargs;
 #undef PASS_NR_ARGS
 #undef FORKER_GEN_SYNC
@@ -4569,4 +4879,4 @@ forker_main(int argc, char ** argv, int(*test_func)(const int, char ** const))
 }
 // }}} forker
 
-// fdm: marker
+// vim:fdm=marker

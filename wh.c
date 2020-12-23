@@ -351,7 +351,7 @@ kv_dup2_key_prefix(const struct kv * const from, struct kv * const to, const u32
   inline bool
 kv_match(const struct kv * const key1, const struct kv * const key2)
 {
-  //cpu_prefetchr(((u8 *)key2) + 64, 0);
+  //cpu_prefetch0(((u8 *)key2) + 64);
   //return (key1->hash == key2->hash)
   //  && (key1->klen == key2->klen)
   //  && (!memcmp(key1->kv, key2->kv, key1->klen));
@@ -363,6 +363,19 @@ kv_match_full(const struct kv * const kv1, const struct kv * const kv2)
 {
   return (kv1->kvlen == kv2->kvlen)
     && (!memcmp(kv1, kv2, sizeof(*kv1) + kv1->klen + kv1->vlen));
+}
+
+  bool
+kv_match_kv128(const struct kv * const sk, const u8 * const kv128)
+{
+  debug_assert(sk);
+  debug_assert(kv128);
+
+  u32 klen128 = 0;
+  u32 vlen128 = 0;
+  const u8 * const pdata = vi128_decode_u32(vi128_decode_u32(kv128, &klen128), &vlen128);
+  (void)vlen128;
+  return (sk->klen == klen128) && (!memcmp(sk->kv, pdata, klen128));
 }
 
   inline int
@@ -385,8 +398,7 @@ kv_compare_pp(const void * const p1, const void * const p2)
   int
 kv_compare_k128(const struct kv * const sk, const u8 * const k128)
 {
-  if (sk == NULL)
-    return -1;
+  debug_assert(sk);
   const u32 klen1 = sk->klen;
   u32 klen2 = 0;
   const u8 * const ptr2 = vi128_decode_u32(k128, &klen2);
@@ -399,8 +411,7 @@ kv_compare_k128(const struct kv * const sk, const u8 * const k128)
   int
 kv_compare_kv128(const struct kv * const sk, const u8 * const kv128)
 {
-  if (sk == NULL)
-    return -1;
+  debug_assert(sk);
   const u32 klen1 = sk->klen;
   u32 klen2 = 0;
   u32 vlen2 = 0;
@@ -417,43 +428,11 @@ kv_qsort(struct kv ** const kvs, const size_t nr)
 }
 
 // return the length of longest common prefix of the two keys
-  u32
+  inline u32
 kv_key_lcp(const struct kv * const key1, const struct kv * const key2)
 {
   const u32 max = (key1->klen < key2->klen) ? key1->klen : key2->klen;
-  u32 clen = 0;
-  const u8 * p1 = key1->kv;
-  const u8 * p2 = key2->kv;
-
-  const u32 max64 = max >> 3 << 3;
-  while (clen < max64) {
-    const u64 v1 = *(const u64 *)p1;
-    const u64 v2 = *(const u64 *)p2;
-    if (v1 != v2)
-      return clen + (u32)(__builtin_ctzl(v1 ^ v2) >> 3);
-
-    clen += sizeof(u64);
-    p1 += sizeof(u64);
-    p2 += sizeof(u64);
-  }
-
-  if ((clen + sizeof(u32)) <= max) {
-    const u32 v1 = *(const u32 *)p1;
-    const u32 v2 = *(const u32 *)p2;
-    if (v1 != v2)
-      return clen + (u32)(__builtin_ctz(v1 ^ v2) >> 3);
-
-    clen += sizeof(u32);
-    p1 += sizeof(u32);
-    p2 += sizeof(u32);
-  }
-
-  while ((clen < max) && (*p1 == *p2)) {
-    clen++;
-    p1++;
-    p2++;
-  }
-  return clen;
+  return memlcp(key1->kv, key2->kv, max);
 }
 // }}}
 
@@ -688,6 +667,12 @@ kref_ref_kv(struct kref * const kref, const struct kv * const kv)
   kref->hash32 = kv->hashlo;
 }
 
+  inline bool
+kref_match(const struct kref * const k1, const struct kref * const k2)
+{
+  return (k1->len == k2->len) && (!memcmp(k1->ptr, k2->ptr, k1->len));
+}
+
 // match a kref and a key
   inline bool
 kref_kv_match(const struct kref * const kref, const struct kv * const k)
@@ -698,6 +683,8 @@ kref_kv_match(const struct kref * const kref, const struct kv * const k)
   inline int
 kref_compare(const struct kref * const kref1, const struct kref * const kref2)
 {
+  debug_assert(kref1);
+  debug_assert(kref2);
   const u32 len = kref1->len < kref2->len ? kref1->len : kref2->len;
   const int cmp = memcmp(kref1->ptr, kref2->ptr, (size_t)len);
   return cmp ? cmp : (((int)kref1->len) - ((int)kref2->len));
@@ -707,17 +694,25 @@ kref_compare(const struct kref * const kref1, const struct kref * const kref2)
   inline int
 kref_kv_compare(const struct kref * const kref, const struct kv * const k)
 {
+  debug_assert(kref);
+  debug_assert(k);
   const u32 len = kref->len < k->klen ? kref->len : k->klen;
   const int cmp = memcmp(kref->ptr, k->kv, (size_t)len);
   return cmp ? cmp : (((int)kref->len) - ((int)k->klen));
+}
+
+  inline u32
+kref_lcp(const struct kref * const k1, const struct kref * const k2)
+{
+  const u32 max = (k1->len < k2->len) ? k1->len : k2->len;
+  return memlcp(k1->ptr, k2->ptr, max);
 }
 
 // klen, key, ...
   inline int
 kref_k128_compare(const struct kref * const sk, const u8 * const k128)
 {
-  if (sk == NULL)
-    return -1;
+  debug_assert(sk);
   const u32 klen1 = sk->len;
   u32 klen2 = 0;
   const u8 * const ptr2 = vi128_decode_u32(k128, &klen2);
@@ -731,8 +726,7 @@ kref_k128_compare(const struct kref * const sk, const u8 * const k128)
   inline int
 kref_kv128_compare(const struct kref * const sk, const u8 * const kv128)
 {
-  if (sk == NULL)
-    return -1;
+  debug_assert(sk);
   const u32 klen1 = sk->len;
   u32 klen2 = 0;
   u32 vlen2 = 0;
@@ -777,9 +771,123 @@ kvref_dup2_kv(struct kvref * const ref, struct kv * const to)
 }
 // }}} kvref
 
+// kv128 {{{
+// estimate the encoded size
+  inline size_t
+kv128_estimate_kv(const struct kv * const kv)
+{
+  return vi128_estimate_u32(kv->klen) + vi128_estimate_u32(kv->vlen) + kv->klen + kv->vlen;
+}
+
+// create a kv128 from kv
+  u8 *
+kv128_encode_kv(const struct kv * const kv, u8 * const out, size_t * const pesize)
+{
+  u8 * const ptr = out ? out : malloc(kv128_estimate_kv(kv));
+  if (!ptr)
+    return NULL;
+
+  u8 * const pdata = vi128_encode_u32(vi128_encode_u32(ptr, kv->klen), kv->vlen);
+  memcpy(pdata, kv->kv, kv->klen + kv->vlen);
+
+  if (pesize)
+    *pesize = (size_t)(pdata - ptr) + kv->klen + kv->vlen;
+  return ptr; // return the head of the encoded kv128
+}
+
+// dup kv128 to a kv
+  struct kv *
+kv128_decode_kv(const u8 * const ptr, struct kv * const out, size_t * const pesize)
+{
+  u32 klen, vlen;
+  const u8 * const pdata = vi128_decode_u32(vi128_decode_u32(ptr, &klen), &vlen);
+  struct kv * const ret = out ? out : malloc(sizeof(struct kv) + klen + vlen);
+  if (ret)
+    kv_refill(ret, pdata, klen, pdata + klen, vlen);
+
+  if (pesize)
+    *pesize = (size_t)(pdata - ptr) + klen + vlen;
+  return ret; // return the kv
+}
+
+  inline size_t
+kv128_size(const u8 * const ptr)
+{
+  u32 klen, vlen;
+  const u8 * const pdata = vi128_decode_u32(vi128_decode_u32(ptr, &klen), &vlen);
+  return ((size_t)(pdata - ptr)) + klen + vlen;
+}
+// }}} kv128
+
 // }}} kv
 
 // kvmap {{{
+
+// registry {{{
+// increase MAX if need more
+#define KVMAP_API_MAX ((32))
+static struct kvmap_api_reg kvmap_api_regs[KVMAP_API_MAX];
+static u64 kvmap_api_regs_nr = 0;
+
+  void
+kvmap_api_register(const int nargs, const char * const name, const char * const args_msg,
+    void * (*create)(const char *, const struct kvmap_mm *, char **), const struct kvmap_api * const api)
+{
+  if (kvmap_api_regs_nr < KVMAP_API_MAX) {
+    kvmap_api_regs[kvmap_api_regs_nr].nargs = nargs;
+    kvmap_api_regs[kvmap_api_regs_nr].name = name;
+    kvmap_api_regs[kvmap_api_regs_nr].args_msg = args_msg;
+    kvmap_api_regs[kvmap_api_regs_nr].create = create;
+    kvmap_api_regs[kvmap_api_regs_nr].api = api;
+    kvmap_api_regs_nr++;
+  } else {
+    fprintf(stderr, "%s failed to register [%s]\n", __func__, name);
+  }
+}
+  void
+kvmap_api_helper_message(void)
+{
+  fprintf(stderr, "%s Usage: api <map-type> <param1> ...\n", __func__);
+  for (u64 i = 0; i < kvmap_api_regs_nr; i++) {
+    fprintf(stderr, "%s example: api %s %s\n", __func__,
+        kvmap_api_regs[i].name, kvmap_api_regs[i].args_msg);
+  }
+}
+
+  int
+kvmap_api_helper(int argc, char ** const argv,
+    const struct kvmap_mm * const mm, const bool locking,
+    const struct kvmap_api ** const api_out, void ** const map_out)
+{
+  // "api" "name" "arg1", ...
+  if (argc < 2 || strcmp(argv[0], "api") != 0)
+    return -1;
+
+  for (u64 i = 0; i < kvmap_api_regs_nr; i++) {
+    const struct kvmap_api_reg * const reg = &kvmap_api_regs[i];
+    if (0 != strcmp(argv[1], reg->name))
+      continue;
+
+    if ((argc - 2) < reg->nargs)
+      return -1;
+
+    void * const map = reg->create(argv[1], mm, argv + 2); // skip "api" "name"
+    if (map) {
+      if (reg->api->locking)
+        reg->api->locking(map, locking);
+
+      *api_out = reg->api;
+      *map_out = map;
+      return 2 + reg->nargs;
+    } else {
+      return -1;
+    }
+  }
+
+  // no match
+  return -1;
+}
+// }}} registry
 
 // internal {{{
 struct entry13 {
@@ -834,7 +942,7 @@ kvmap_entry_update(struct kvmap_mm * const mm, struct entry13 * const e, const s
 }
 // }}} internal
 
-// api {{{
+// misc {{{
   void
 kvmap_inp_steal_kv(struct kv * const kv, void * const priv)
 {
@@ -855,7 +963,7 @@ kvmap_unref(const struct kvmap_api * const api, void * const ref)
 {
   return api->unref ? api->unref(ref) : ref;
 }
-// }}} api
+// }}} misc
 
 // kvmap_kv_op {{{
   inline struct kv *
@@ -991,6 +1099,7 @@ kvmap_raw_iter_seek(const struct kvmap_api * const api, void * const iter,
 }
 // }}}} kvmap_raw_op
 
+
 // }}} kvmap
 
 // wormhole {{{
@@ -1074,7 +1183,7 @@ static_assert(sizeof(struct wormhmap) == 64, "sizeof(wormhmap) != 64");
 
 struct wormhole {
   // 1 line
-  au64 hmap_ptr; // struct wormhmap *
+  volatile au64 hmap_ptr; // struct wormhmap *
   u64 padding0[6];
   struct wormleaf * leaf0; // usually not used
   // 1 line
@@ -1134,7 +1243,7 @@ wormhole_key_meta_match(const struct kv * const key, const struct wormmeta * con
 wormhole_kref_meta_match(const struct kref * const kref,
     const struct wormmeta * const meta)
 {
-  cpu_prefetchr(meta->lmost, 0);
+  cpu_prefetch0(meta->lmost);
   return (kref->len == meta->klen)
     && (!memcmp(kref->ptr, meta->keyref->kv, kref->len));
 }
@@ -1145,7 +1254,7 @@ wormhole_kref1_meta_match(const struct kref * const kref,
     const struct wormmeta * const meta, const u8 cid)
 {
   const u8 * const keybuf = meta->keyref->kv;
-  cpu_prefetchr(meta->rmost, 0);
+  cpu_prefetch0(meta->rmost);
   const u32 plen = kref->len;
   return ((plen + 1) == meta->klen)
     && (!memcmp(kref->ptr, keybuf, plen))
@@ -1453,7 +1562,7 @@ wormhole_hmap_prefetch_pmap(const struct wormhmap * const hmap, const u32 idx)
   (void)hmap;
   (void)idx;
 #else
-  cpu_prefetchr(&(hmap->pmap[idx]), 0);
+  cpu_prefetch0(&(hmap->pmap[idx]));
 #endif
 }
 
@@ -1462,7 +1571,7 @@ wormhole_hmap_get_meta(const struct wormhmap * const hmap, const u32 mid, const 
 {
   struct wormmeta * const meta = hmap->pmap[mid].e[i>>1];
 #if defined(CORR)
-  cpu_prefetchr(meta, 0);
+  cpu_prefetch0(meta);
   corr_yield();
 #endif
   return meta;
@@ -1472,12 +1581,12 @@ wormhole_hmap_get_meta(const struct wormhmap * const hmap, const u32 mid, const 
 wormhole_meta_down_prev(struct wormleaf * const leaf)
 {
 #if defined(CORR)
-  cpu_prefetchr(leaf, 0);
+  cpu_prefetch0(leaf);
   corr_yield();
   // the prev will be prefetched afterwards
-  // cpu_prefetchr(leaf->prev, 0);
+  // cpu_prefetch0(leaf->prev);
 #else
-  cpu_prefetchr(leaf->prev, 0);
+  cpu_prefetch0(leaf->prev);
 #endif
   return leaf->prev;
 }
@@ -1487,12 +1596,12 @@ wormhole_leaf_prefetch(struct wormleaf * const leaf, const u32 hashlo)
 {
   const u64 i = wormhole_pkey(hashlo) / WH_HDIV;
 #if defined(CORR)
-  cpu_prefetchr(leaf, 0);
-  cpu_prefetchr(&(leaf->eh[i-4]), 0);
-  cpu_prefetchr(&(leaf->eh[i+4]), 0);
+  cpu_prefetch0(leaf);
+  cpu_prefetch0(&(leaf->eh[i-4]));
+  cpu_prefetch0(&(leaf->eh[i+4]));
   corr_yield();
 #else
-  cpu_prefetchr(&(leaf->eh[i]), 0);
+  cpu_prefetch0(&(leaf->eh[i]));
 #endif
 }
 
@@ -1501,11 +1610,11 @@ wormhole_kref_kv_match(const struct kref * const key, const struct kv * const cu
 {
 #if defined(CORR)
   const u8 * const ptr = (typeof(ptr))curr;
-  cpu_prefetchr(ptr, 0);
-  cpu_prefetchr(ptr + 64, 0);
+  cpu_prefetch0(ptr);
+  cpu_prefetch0(ptr + 64);
   if (key->len > 56) {
-    cpu_prefetchr(ptr + 128, 0);
-    cpu_prefetchr(ptr + 192, 0);
+    cpu_prefetch0(ptr + 128);
+    cpu_prefetch0(ptr + 192);
   }
   corr_yield();
 #endif
@@ -3787,9 +3896,9 @@ wormhole_iter_kvref(struct wormhole_iter * const iter, struct kvref * const kvre
 }
 
   void
-wormhole_iter_skip(struct wormhole_iter * const iter, const u64 nr)
+wormhole_iter_skip(struct wormhole_iter * const iter, const u32 nr)
 {
-  for (u64 i = 0; i < nr; i++) {
+  for (u32 i = 0; i < nr; i++) {
     if (!wormhole_iter_valid(iter))
       return;
     iter->next_id++;
@@ -3897,9 +4006,9 @@ whunsafe_iter_valid(struct wormhole_iter * const iter)
 }
 
   void
-whunsafe_iter_skip(struct wormhole_iter * const iter, const u64 nr)
+whunsafe_iter_skip(struct wormhole_iter * const iter, const u32 nr)
 {
-  for (u64 i = 0; i < nr; i++) {
+  for (u32 i = 0; i < nr; i++) {
     if (!wormhole_iter_valid(iter))
       return;
     iter->next_id++;
@@ -3999,26 +4108,39 @@ wormhole_clean_hmap(struct wormhole * const map)
   }
 }
 
+  static void
+wormhole_free_leaf_keys(struct wormleaf * const leaf, kvmap_mm_free_func free_func, void * const free_priv)
+{
+  void * tmp = NULL;
+  for (u64 i = 0; i < WH_KPN; i++) {
+    if (leaf->eh[i].v64) {
+      void * const curr = u64_to_ptr(leaf->eh[i].e3);
+      cpu_prefetch0(curr);
+      if (tmp)
+        free_func(tmp, free_priv);
+      tmp = curr;
+    }
+  }
+  cpu_prefetch0(leaf->anchor);
+  if (tmp)
+    free_func(tmp, free_priv);
+  wormhole_free_akey(leaf->anchor);
+}
+
   static void *
 wormhole_clean_worker(void * const ptr)
 {
   struct wormhole * const map = (typeof(map))ptr;
   const u32 nr = map->clean_ths;
   const u32 seq = atomic_fetch_add(&map->clean_seq, 1);
-
   kvmap_mm_free_func free_func = map->mm.free;
   void * const free_priv = map->mm.priv;
 
   struct wormleaf * leaf = map->leaf0;
   do {
     for (u32 x = 0; leaf && (x < nr); x++) {
-      if (x == seq) {
-        for (u64 i = 0; i < WH_KPN; i++) {
-          if (leaf->eh[i].v64)
-            free_func(u64_to_ptr(leaf->eh[i].e3), free_priv);
-        }
-        wormhole_free_akey(leaf->anchor);
-      }
+      if (x == seq)
+        wormhole_free_leaf_keys(leaf, free_func, free_priv);
       leaf = leaf->next;
     }
   } while (leaf);
@@ -4031,7 +4153,7 @@ wormhole_clean_free(struct wormhole * const map, const u32 ths)
 {
   wormhole_clean_hmap(map);
   map->clean_seq = 0;
-  map->clean_ths = (ths >= 2) ? ths : 2; // at least 2 threads
+  map->clean_ths = ths;
   thread_fork_join(ths, wormhole_clean_worker, false, map);
   slab_free_all(map->slab_leaf);
   map->leaf0 = NULL;
@@ -4165,6 +4287,28 @@ const struct kvmap_api kvmap_api_whunsafe = {
   .destroy = (void *)wormhole_destroy,
   .fprint = (void *)wormhole_fprint,
 };
+
+  static void *
+wormhole_kvmap_api_create(const char * const name, const struct kvmap_mm * const mm, char ** args)
+{
+  (void)args;
+  if ((!strcmp(name, "wormhole")) || (!strcmp(name, "whsafe"))) {
+    return wormhole_create(mm);
+  } else if (!strcmp(name, "whunsafe")) {
+    return whunsafe_create(mm);
+  } else {
+    return NULL;
+  }
+}
+
+__attribute__((constructor))
+  static void
+wormhole_kvmap_api_init(void)
+{
+  kvmap_api_register(0, "wormhole", "", wormhole_kvmap_api_create, &kvmap_api_wormhole);
+  kvmap_api_register(0, "whsafe", "", wormhole_kvmap_api_create, &kvmap_api_whsafe);
+  kvmap_api_register(0, "whunsafe", "", wormhole_kvmap_api_create, &kvmap_api_whunsafe);
+}
 // }}} api
 
 // undef {{{
@@ -4181,100 +4325,4 @@ const struct kvmap_api kvmap_api_whunsafe = {
 
 // }}} wormhole
 
-// kvmap_api {{{
-// increase MAX if need more
-#define KVMAP_API_MAX ((16))
-static const struct kvmap_api_reg * kvmap_api_regs[KVMAP_API_MAX];
-static u64 kvmap_api_regs_nr = 0;
-
-  void
-kvmap_api_register(const struct kvmap_api_reg * const reg)
-{
-  debug_assert(kvmap_api_regs_nr < KVMAP_API_MAX);
-  kvmap_api_regs[kvmap_api_regs_nr] = reg;
-  kvmap_api_regs_nr++;
-}
-
-static const struct {
-  const char * name;
-  void * (*cf)(const struct kvmap_mm *);
-  const struct kvmap_api * api;
-} kvmap_api_list1[] = {
-  {"wormhole", (void *)wormhole_create, &kvmap_api_wormhole},
-  {"whsafe", (void *)wormhole_create, &kvmap_api_whsafe},
-  {"whunsafe", (void *)whunsafe_create, &kvmap_api_whunsafe},
-  {NULL, NULL, NULL},
-};
-
-  void
-kvmap_api_helper_message(void)
-{
-  fprintf(stderr, "%s Usage: api <map-type> <param1> ...\n", __func__);
-  for (u64 i = 0; kvmap_api_list1[i].name; i++) {
-    fprintf(stderr, "%s example: api %s\n", __func__,
-        kvmap_api_list1[i].name);
-  }
-  for (u64 i = 0; i < kvmap_api_regs_nr; i++) {
-    fprintf(stderr, "%s example: api %s %s\n", __func__,
-        kvmap_api_regs[i]->name, kvmap_api_regs[i]->args_msg);
-  }
-}
-
-  int
-kvmap_api_helper(int argc, char ** const argv,
-    const struct kvmap_mm * const mm, const bool locking,
-    const struct kvmap_api ** const api_out, void ** const map_out)
-{
-  // "api" "name" "arg1", ...
-  if (argc < 2 || strcmp(argv[0], "api") != 0)
-    return -1;
-
-  void * map = NULL;
-  const struct kvmap_api * api = NULL;
-
-  for (u64 i = 0; i < kvmap_api_regs_nr; i++) {
-    const struct kvmap_api_reg * const reg = kvmap_api_regs[i];
-    if (0 != strcmp(argv[1], reg->name))
-      continue;
-
-    if ((argc + 2) < reg->nargs)
-      return -1;
-
-    map = reg->create(argv[1], mm, argv + 2); // skip "api" "name"
-    if (map) {
-      if (reg->api->locking)
-        reg->api->locking(map, locking);
-
-      *api_out = reg->api;
-      *map_out = map;
-      return 2 + reg->nargs;
-    } else {
-      return -1;
-    }
-  }
-
-  for (u64 i = 0; kvmap_api_list1[i].name; i++) {
-    if (!strcmp(argv[1], kvmap_api_list1[i].name)) {
-      map = kvmap_api_list1[i].cf(mm);
-      if (!map)
-        return -1;
-      api = kvmap_api_list1[i].api;
-      if (api->locking)
-        api->locking(map, locking);
-      *map_out = map;
-      *api_out = api;
-      return 2;
-    }
-  }
-
-  int used = -1;
-  // non-trivial map types
-  if (used > 1 && map && api) {
-    if (api->locking)
-      api->locking(map, locking);
-    *map_out = map;
-    *api_out = api;
-  }
-  return used;
-}
-// }}} kvmap_api
+// vim:fdm=marker

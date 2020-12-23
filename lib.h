@@ -18,6 +18,7 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 // POSIX headers
 #include <fcntl.h>
@@ -32,22 +33,32 @@ extern "C" {
 // }}} includes
 
 // types {{{
-typedef int_least8_t            s8;
-typedef int_least16_t           s16;
-typedef int_least32_t           s32;
-typedef int_least64_t           s64;
-typedef __int128_t              s128;
+typedef char            s8;
+typedef short           s16;
+typedef int             s32;
+typedef long            s64;
+typedef __int128_t      s128;
+static_assert(sizeof(s8) == 1, "sizeof(s8)");
+static_assert(sizeof(s16) == 2, "sizeof(s16)");
+static_assert(sizeof(s32) == 4, "sizeof(s32)");
+static_assert(sizeof(s64) == 8, "sizeof(s64)");
+static_assert(sizeof(s128) == 16, "sizeof(s128)");
 
-typedef uint_least8_t           u8;
-typedef uint_least16_t          u16;
-typedef uint_least32_t          u32;
-typedef uint_least64_t          u64;
-typedef __uint128_t             u128;
+typedef unsigned char   u8;
+typedef unsigned short  u16;
+typedef unsigned int    u32;
+typedef unsigned long   u64;
+typedef __uint128_t     u128;
+static_assert(sizeof(u8) == 1, "sizeof(u8)");
+static_assert(sizeof(u16) == 2, "sizeof(u16)");
+static_assert(sizeof(u32) == 4, "sizeof(u32)");
+static_assert(sizeof(u64) == 8, "sizeof(u64)");
+static_assert(sizeof(u128) == 16, "sizeof(u128)");
 // }}} types
 
 // defs {{{
-#define likely(x)   __builtin_expect(x, 1)
-#define unlikely(x) __builtin_expect(x, 0)
+#define likely(____x____)   __builtin_expect(____x____, 1)
+#define unlikely(____x____) __builtin_expect(____x____, 0)
 
 // ansi colors
 // 3X:fg; 4X:bg; 9X:light fg; 10X:light bg;
@@ -103,7 +114,16 @@ cpu_mfence(void);
 cpu_cfence(void);
 
   extern void
-cpu_prefetchr(const void * const ptr, const int hint);
+cpu_prefetch0(const void * const ptr);
+
+  extern void
+cpu_prefetch1(const void * const ptr);
+
+  extern void
+cpu_prefetch2(const void * const ptr);
+
+  extern void
+cpu_prefetch3(const void * const ptr);
 
   extern void
 cpu_prefetchw(const void * const ptr);
@@ -433,6 +453,14 @@ vi128_decode_u64(const u8 * src, u64 * const out);
 vi128_decode_u32(const u8 * src, u32 * const out);
 // }}} bits
 
+// misc {{{
+  extern size_t
+fdsize(const int fd);
+
+  extern u32
+memlcp(const u8 * p1, const u8 * p2, const u32 max);
+// }}} misc
+
 // bitmap {{{
 struct bitmap;
 
@@ -456,6 +484,9 @@ bitmap_set0(struct bitmap * const bm, const u64 idx);
 
   extern u64
 bitmap_count(struct bitmap * const bm);
+
+  extern u64
+bitmap_first(struct bitmap * const bm);
 
   extern void
 bitmap_set_all1(struct bitmap * const bm);
@@ -485,6 +516,19 @@ bf_clean(struct bf * const bf);
   extern void
 bf_destroy(struct bf * const bf);
 // }}} bloom filter
+
+// oalloc {{{
+struct oalloc;
+
+  extern struct oalloc *
+oalloc_create(const size_t blksz);
+
+  extern void *
+oalloc_alloc(struct oalloc * const o, const size_t size);
+
+  extern void
+oalloc_destroy(struct oalloc * const o);
+// }}} oalloc
 
 // slab {{{
 struct slab;

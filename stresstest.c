@@ -117,10 +117,10 @@ kv_stress_worker(const struct kvmap_info * const info)
       // use prefetch to minimize overhead on workload generation
       struct kv * const key = next;
       next = keys[rnext];
-      cpu_prefetchr(next, 0);
-      cpu_prefetchr(((u8 *)next) + 64, 0);
+      cpu_prefetch0(next);
+      cpu_prefetch0(((u8 *)next) + 64);
       rnext = rgen_next(gi);
-      cpu_prefetchr(&(keys[rnext]), 0);
+      cpu_prefetch0(&(keys[rnext]));
 
       // do probe
       // customize your benchmark: do a mix of wh operations with switch-cases
