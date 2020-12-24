@@ -23,10 +23,14 @@ O ?= rg
 # predefined OPT: make O={rg,r,0g,3g,p,0s,3s,cov,mc,hc,wn,stk}
 ifeq ($O,rg) # make O=rg
 OPT ?= -DNDEBUG -g3 -O3 -flto -fno-stack-protector
-else ifeq ($O,r) # make O=r
+else ifeq ($O,r) # make O=r (for release)
 OPT ?= -DNDEBUG -O3 -flto -fno-stack-protector
+else ifeq ($O,ns) # make O=ns (no signal handlers)
+OPT ?= -DNDEBUG -O3 -flto -fno-stack-protector -DNOSIGNAL
 else ifeq ($O,0g) # make O=0g
 OPT ?= -g3 -O0 -fno-inline
+else ifeq ($O,2g) # make O=2g
+OPT ?= -g3 -O2
 else ifeq ($O,3g) # make O=3g
 OPT ?= -g3 -O3 -flto -fno-inline
 else ifeq ($O,p) # make O=p (profiling: rg+noinline)
@@ -35,7 +39,7 @@ else ifeq ($O,0s) # make O=0s (address sanitizer)
 OPT ?= -g3 -O0 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DHEAPCHECKING
 else ifeq ($O,3s) # make O=3s (address sanitizer)
 OPT ?= -g3 -O3 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DHEAPCHECKING
-else ifeq ($O,cov) # make O=c (for gcov)
+else ifeq ($O,cov) # make O=cov (for gcov)
 OPT ?= -g3 -DNDEBUG -O0 --coverage
 CCC = gcc
 else ifeq ($O,mc) # make O=mc (for valgrind memcheck)
@@ -45,7 +49,7 @@ else ifeq ($O,hc) # make O=hc (for gperftools heapcheck)
 OPT ?= -g3 -O1 -fno-inline
 LIB += tcmalloc
 else ifeq ($O,wn) # more warning
-OPT ?= -g3 -O3 -Wvla -Wformat=2 -Wconversion
+OPT ?= -g3 -O3 -Wvla -Wformat=2 -Wconversion -Wstrict-prototypes -Wmissing-prototypes
 else ifeq ($O,stk) # check stack usage with gcc
 OPT ?= -g3 -O3 -DNDEBUG -fstack-usage
 CCC = gcc
@@ -61,8 +65,20 @@ else ifeq ($M,j)
   LIB += jemalloc
 endif
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+  LIB += rt
+else ifeq ($(UNAME_S),FreeBSD)
+  LIB += rt
+  LIB += execinfo
+else ifeq ($(UNAME_S),Darwin)
+  # do nothing
+else
+  # TODO
+endif
+
 CCC ?= clang
-CSTD = -std=gnu11
+CSTD = -std=gnu18
 XCC ?= clang++
 XSTD = -std=gnu++17
 
@@ -149,7 +165,7 @@ check :
 	cppcheck -I /usr/include -I /usr/local/include $(addprefix -I ,$(CCINC)) \
     -q -D__x86_64__=1 -DNDEBUG -U__cplusplus \
     --std=c11 --language=c --platform=unix64 \
-    --enable=warning,style,performance,portability,information .
+    --enable=warning,style,performance,portability,information --inline-suppr .
 
 tags :
 	ctags -R . /usr/include /usr/local/include $(CCINC)

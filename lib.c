@@ -17,10 +17,16 @@
 #include <sys/socket.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <time.h>
+
 #if defined(__linux__)
 #include <linux/fs.h>
+#elif defined(__APPLE__) && defined(__MACH__)
+#include <sys/disk.h>
+#elif defined(__FreeBSD__)
+#include <sys/disk.h>
 #endif
-#include <time.h>
+
 #if defined(__FreeBSD__)
 #include <pthread_np.h>
 #endif
@@ -1935,8 +1941,19 @@ fdsize(const int fd)
   if (fstat(fd, &st) != 0)
     return 0;
 
-  if (S_ISBLK(st.st_mode))
+  if (S_ISBLK(st.st_mode)) {
+#if defined(__linux__)
     ioctl(fd, BLKGETSIZE64, &st.st_size);
+#elif defined(__APPLE__) && defined(__MACH__)
+    u64 blksz = 0;
+    u64 nblks = 0;
+    ioctl(fd, DKIOCGETBLOCKSIZE, &blksz);
+    ioctl(fd, DKIOCGETBLOCKCOUNT, &nblks);
+    st.st_size = blksz * nblks;
+#elif defined(__FreeBSD__)
+    ioctl(fd, DIOCGMEDIASIZE, &st.st_size);
+#endif
+  }
 
   return st.st_size;
 }

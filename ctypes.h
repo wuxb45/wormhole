@@ -7,6 +7,7 @@
 
 // C types only
 
+#include <assert.h>
 #include <stdatomic.h>
 #if defined(__x86_64__)
 #include <x86intrin.h>
@@ -18,15 +19,23 @@
 /* C11 atomic types */
 typedef atomic_bool             abool;
 
-typedef atomic_uint_least8_t    au8;
-typedef atomic_uint_least16_t   au16;
-typedef atomic_uint_least32_t   au32;
-typedef atomic_uint_least64_t   au64;
+typedef atomic_uchar    au8;
+typedef atomic_ushort   au16;
+typedef atomic_uint     au32;
+typedef atomic_ulong    au64;
+static_assert(sizeof(au8) == 1, "sizeof(au8)");
+static_assert(sizeof(au16) == 2, "sizeof(au16)");
+static_assert(sizeof(au32) == 4, "sizeof(au32)");
+static_assert(sizeof(au64) == 8, "sizeof(au64)");
 
-typedef atomic_int_least8_t     as8;
-typedef atomic_int_least16_t    as16;
-typedef atomic_int_least32_t    as32;
-typedef atomic_int_least64_t    as64;
+typedef atomic_char     as8;
+typedef atomic_short    as16;
+typedef atomic_int      as32;
+typedef atomic_long     as64;
+static_assert(sizeof(as8) == 1, "sizeof(as8)");
+static_assert(sizeof(as16) == 2, "sizeof(as16)");
+static_assert(sizeof(as32) == 4, "sizeof(as32)");
+static_assert(sizeof(as64) == 8, "sizeof(as64)");
 
 // shorten long names
 #define MO_RELAXED memory_order_relaxed

@@ -21,7 +21,7 @@ MODULES += lib wh
 HEADERS += ctypes
 
 FLG +=
-LIB += rt m
+LIB += m
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),FreeBSD)
