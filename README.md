@@ -79,7 +79,7 @@ The Wormhole functions are listed near the bottom of wh.h (see the `wormhole_*` 
 There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
 * `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimal complexity in your code, you should use `whsafe`.
 * `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for deadlock prevention.
-* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform any concurrency control. It works correctly only in multi-reader or single-writer environments.
+* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform internal concurrency control. External synchronization should be used in a concurrent environment.
 
 The functions of each API can be found near the end of `wh.c` (search `kvmap_api_whsafe`, `kvmap_api_wormhole`, and `kvmap_api_whunsafe`).
 Note that each API contains a mix of `whsafe_*`, `wormhole_*`, and `whunsafe_*` functions.
