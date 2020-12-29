@@ -1,6 +1,7 @@
 # Wormhole
 
-The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered Index for In-memory Data Management"](https://www.cs.uic.edu/~wuxb/papers/wormhole.pdf) by Xingbo Wu, Fan Ni, and Song Jiang ([ACM DL](https://dl.acm.org/citation.cfm?id=3303955)).
+The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered Index for In-memory Data Management"](https://www.cs.uic.edu/~wuxb/papers/wormhole.pdf)
+by Xingbo Wu, Fan Ni, and Song Jiang ([ACM DL](https://dl.acm.org/citation.cfm?id=3303955)).
 
 This repository maintains a reference implementation of the Wormhole index structure on x86\_64 Linux/FreeBSD with SSE 4.2.
 The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
@@ -8,21 +9,24 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
 ## NEWS
-* The `whsafe` API is a *worry-free* thread-safe wormhole API. At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
+* The `whsafe` API is a *worry-free* thread-safe wormhole API.
+At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
 * `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
 
 ## Highlights:
-* Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe. See `stresstest.c` for more thread-safe operations.
+* Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe.
+See `stresstest.c` for more thread-safe operations.
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
-* No background threads or global status. Wormhole uses a mix of user-space rwlocks and QSBR RCU to synchronize between readers and writers. See below for more details.
+* No background threads or global status. Wormhole uses a mix of user-space rwlocks and QSBR RCU to synchronize between readers and writers.
+See below for more details.
 
 # Build
 
 ## x86\_64
-Wormhole is developed & tested on x86\_64 Linux and FreeBSD.
+Wormhole supports 64-bit x86\_64 CPUs running Linux, FreeBSD, or Darwin (Mac OS X).
 Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ make CCC=gcc`).
-On our testbed Clang usually produces faster code.
+On our testbed, Clang usually produces faster code than GCC.
 
 To build:
 
@@ -34,11 +38,10 @@ Alternatively, you may use `O=0g` to enable debug info and disable optimizations
 
 Read `Makefile.common` for options on optimization and debugging levels (O=).
 
-## ARM64 (experimental)
+## AArch64
 
-Wormhole now builds on 64-bit ARM (aarch64). The currect implementation requires NEON SIMD and the `crc` features on the target CPU. The Clang in our testbed (clang-8, Ubuntu 18.04) does not support `-march=native` so the target needs to be explicitly specified.
-
-    $ make CCC=clang-8 ARCH=armv8-a+crc
+Wormhole supports 64-bit ARM CPUs (AArch64). The currect implementation requires NEON SIMD and the `crc` features on the target CPU.
+The code has been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a Jetson Nano running Ubuntu Groovy.
 
 ## Sample programs
 To run the demo code:
@@ -79,7 +82,8 @@ The Wormhole functions are listed near the bottom of wh.h (see the `wormhole_*` 
 There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
 * `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimal complexity in your code, you should use `whsafe`.
 * `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for deadlock prevention.
-* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform internal concurrency control. External synchronization should be used in a concurrent environment.
+* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform internal concurrency control.
+External synchronization should be employed when running whunsafe in a concurrent environment.
 
 The functions of each API can be found near the end of `wh.c` (search `kvmap_api_whsafe`, `kvmap_api_wormhole`, and `kvmap_api_whunsafe`).
 Note that each API contains a mix of `whsafe_*`, `wormhole_*`, and `whunsafe_*` functions.
@@ -199,7 +203,9 @@ For example:
     }
     // perform index operations with ref
 
-A common scenario of dead-locking is when acquiring locks while holding a wormhole reference, since `lock()` functions will block-wait and the calling thread won't be able to update the quiescent state. It is recommanded to always use `trylock()` in a loop and keep updating the qstate:
+A common scenario of dead-locking is when acquiring locks while holding a wormhole reference,
+since `lock()` functions will block-wait and the calling thread won't be able to update the quiescent state.
+It is recommanded to always use `trylock()` in a loop and keep updating the qstate:
 
     while (pthread_mutex_trylock(&some_lock) == EBUSY) {
         wormhole_refresh_qstate(ref);
@@ -323,20 +329,31 @@ Wormhole uses hugepages when available. To reserve some hugepages in Linux (1000
 
 # Tuning
 A few macros in `wh.c` can be tuned.
-* `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation.  The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize those 1GB hugepages.
-* `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128. Setting it to 256 can increase search speed by roughly 10% but slows down internal split/merge operations (but not every insertion/deletion).
-* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU. The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n. The defaults are set to 38 and 8, respectively. This QSBR implementation uses sharding so `wormhole_ref()` will block (busy-waiting) if the target shard is full.
+* `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation.
+The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize those 1GB hugepages.
+* `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128.
+Setting it to 256 can increase search speed by roughly 10% but slows down internal split/merge operations (but not every insertion/deletion).
+* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU.
+The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n.
+The defaults are set to 38 and 8, respectively.
+This QSBR implementation uses sharding so `wormhole_ref()` will block (busy-waiting) if the target shard is full.
 
 # Limitations
 
 ## Key Patterns
 The Wormhole index works well with real-world keys.
 A **split** operation may fail with one of the following (almost impossible) conditions:
-* The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit). Split will fail if all cut-points in the target leaf node require longer anchor-keys. In such case, at least **129** (`WH_KPN + 1`) keys must share a common prefix of 65535+ bytes.
-* Two anchor-keys cannot be identical after removing their trailing zeros. To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (while these two keys can co-exist as regular keys). If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`, `"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeros), the split will fail.
+* The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit).
+Split will fail if all cut-points in the target leaf node require longer anchor-keys.
+In such case, at least **129** (`WH_KPN + 1`) keys must share a common prefix of 65535+ bytes.
+* Two anchor-keys cannot be identical after removing their trailing zeros.
+To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (while these two keys can co-exist as regular keys).
+If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`,
+`"W\0\0\0"` ... and finally a 'W' with at least 128 trailing zeros), the split will fail.
 
 ## Memory Allocation
-Insertions can fail when there is not enough memory. The current implementation can safely return after any failed memory allocation, except for hash-table expansion (resizing).
+Insertions can fail when there is not enough memory.
+The current implementation can safely return after any failed memory allocation, except for hash-table expansion (resizing).
 On memory-allocation failure, the expansion function will block and wait for available memory to proceed.
 In the future, this behavior will be changed to returning with an insertion failure.
 
