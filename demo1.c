@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "lib.h"
+#include "kv.h"
 #include "wh.h"
 
 char * __buf = NULL;

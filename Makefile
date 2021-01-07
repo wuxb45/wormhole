@@ -16,7 +16,7 @@ SOURCES +=
 # X => X.S only
 ASSMBLY +=
 # X => X.c X.h
-MODULES += lib wh
+MODULES += lib kv wh
 # X => X.h
 HEADERS += ctypes
 
@@ -35,7 +35,7 @@ FLG += -DFORKER_PAPI
 endif
 
 bin : libwh.so
-libwh.so : wh.c wh.h lib.c lib.h
-	$(CCC) $(FLG) -shared -fPIC -o $@ wh.c lib.c
+libwh.so : lib.c lib.h kv.c kv.h wh.c wh.h
+	$(CCC) $(FLG) -shared -fPIC -o $@ lib.c kv.c wh.c
 
 include Makefile.common

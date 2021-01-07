@@ -148,7 +148,7 @@ endif
 	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) -S -o $@ -c $<
 
 clean :
-	rm -rf *.out *.dis *.o *.gcda *.gcno *.gcov
+	rm -rf *.out *.dis *.o *.so *.gcda *.gcno *.gcov
 
 cleanall :
 	rm -rf *.out *.dis *.o $(EXTERNDEP) $(EXTERNSRC)

@@ -215,6 +215,48 @@ crc32c_u64(const u32 crc, const u64 v)
   return (u32)__crc32cd(crc, v);
 #endif
 }
+
+  inline u32
+crc32c_inc_123(const u8 * buf, u32 nr, u32 crc)
+{
+  if (nr == 1)
+    return crc32c_u8(crc, buf[0]);
+
+  crc = crc32c_u16(crc, *(u16 *)buf);
+  return (nr == 2) ? crc : crc32c_u8(crc, buf[2]);
+}
+
+  inline u32
+crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
+{
+  debug_assert((nr & 3) == 0);
+#pragma nounroll
+  while (nr >= sizeof(u64)) {
+    crc = crc32c_u64(crc, *((u64*)buf));
+    nr -= sizeof(u64);
+    buf += sizeof(u64);
+  }
+  if (nr)
+    crc = crc32c_u32(crc, *((u32*)buf));
+  return crc;
+}
+
+  inline u32
+crc32c_inc(const u8 * buf, u32 nr, u32 crc)
+{
+#pragma nounroll
+  while (nr >= sizeof(u64)) {
+    crc = crc32c_u64(crc, *((u64*)buf));
+    nr -= sizeof(u64);
+    buf += sizeof(u64);
+  }
+  if (nr >= sizeof(u32)) {
+    crc = crc32c_u32(crc, *((u32*)buf));
+    nr -= sizeof(u32);
+    buf += sizeof(u32);
+  }
+  return nr ? crc32c_inc_123(buf, nr, crc) : crc;
+}
 // }}} crc32c
 
 // debug {{{
@@ -300,6 +342,14 @@ debug_die(void)
 {
   debug_wait_gdb();
   exit(0);
+}
+
+__attribute__((noreturn))
+  inline void
+debug_die_perror(void)
+{
+  perror(NULL);
+  debug_die();
 }
 
 #if !defined(NOSIGNAL)
@@ -1048,6 +1098,13 @@ mutex_unlock(mutex * const lock)
 {
   pthread_mutex_t * const p = (typeof(p))lock;
   pthread_mutex_unlock(p); // return value ignored
+}
+
+  inline void
+mutex_deinit(mutex * const lock)
+{
+  pthread_mutex_t * const p = (typeof(p))lock;
+  pthread_mutex_destroy(p);
 }
 // }}} pthread mutex
 
@@ -1933,6 +1990,18 @@ vi128_decode_u32(const u8 * src, u32 * const out)
 // }}} bits
 
 // misc {{{
+  inline void *
+u64_to_ptr(const u64 v)
+{
+  return (void *)v;
+}
+
+  inline u64
+ptr_to_u64(const void * const ptr)
+{
+  return (u64)ptr;
+}
+
   inline size_t
 fdsize(const int fd)
 {

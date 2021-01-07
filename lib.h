@@ -141,6 +141,17 @@ crc32c_u32(const u32 crc, const u32 v);
 
   extern u32
 crc32c_u64(const u32 crc, const u64 v);
+
+// 1 <= nr <= 3
+  extern u32
+crc32c_inc_123(const u8 * buf, u32 nr, u32 crc);
+
+// nr % 4 == 0
+  extern u32
+crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc);
+
+  extern u32
+crc32c_inc(const u8 * buf, u32 nr, u32 crc);
 // }}} crc32c
 
 // debug {{{
@@ -163,6 +174,10 @@ debug_assert(const bool v);
 __attribute__((noreturn))
   extern void
 debug_die(void);
+
+__attribute__((noreturn))
+  extern void
+debug_die_perror(void);
 
   extern void
 debug_dump_maps(FILE * const out);
@@ -324,6 +339,9 @@ mutex_trylock(mutex * const lock);
 
   extern void
 mutex_unlock(mutex * const lock);
+
+  extern void
+mutex_deinit(mutex * const lock);
 // }}} locking
 
 // coroutine {{{
@@ -454,6 +472,12 @@ vi128_decode_u32(const u8 * src, u32 * const out);
 // }}} bits
 
 // misc {{{
+  extern void *
+u64_to_ptr(const u64 v);
+
+  extern u64
+ptr_to_u64(const void * const ptr);
+
   extern size_t
 fdsize(const int fd);
 

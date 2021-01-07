@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include "lib.h"
+#include "kv.h"
 #include "wh.h"
 
 atomic_uint_least64_t __seqno = 0;

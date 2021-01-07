@@ -5,6 +5,7 @@
  */
 #define _GNU_SOURCE
 #include "lib.h"
+#include "kv.h"
 #include "wh.h"
 #include "ctypes.h"
 #include <string.h>
