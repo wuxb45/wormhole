@@ -697,6 +697,21 @@ kvref_dup2_kv(struct kvref * const ref, struct kv * const to)
   return new;
 }
 
+  struct kv *
+kvref_dup2_key(struct kvref * const ref, struct kv * const to)
+{
+  if (ref == NULL)
+    return NULL;
+  const size_t sz = sizeof(*to) + ref->hdr.klen;
+  struct kv * const new = to ? to : malloc(sz);
+  if (new == NULL)
+    return NULL;
+
+  *new = ref->hdr;
+  memcpy(new->kv, ref->kptr, new->klen);
+  return new;
+}
+
   int
 kvref_kv_compare(const struct kvref * const ref, const struct kv * const kv)
 {

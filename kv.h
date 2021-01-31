@@ -283,6 +283,9 @@ kvref_ref_kv(struct kvref * const ref, struct kv * const kv);
   extern struct kv *
 kvref_dup2_kv(struct kvref * const ref, struct kv * const to);
 
+  extern struct kv *
+kvref_dup2_key(struct kvref * const ref, struct kv * const to);
+
   extern int
 kvref_kv_compare(const struct kvref * const ref, const struct kv * const kv);
 // }}} ref
