@@ -9,6 +9,7 @@ The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggress
 Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
 
 ## NEWS
+* `easywh.h` provides a user-friendly interface. See `easydemo.c` for code examples.
 * The `whsafe` API is a *worry-free* thread-safe wormhole API.
 At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
 * `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
@@ -44,11 +45,9 @@ Wormhole supports 64-bit ARM CPUs (AArch64). The currect implementation requires
 The code has been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a Jetson Nano running Ubuntu Groovy.
 
 ## Sample programs
-To run the demo code:
+`easydemo.c` presents how to use wormhole through an user-friendly interface declared in `easywh.h`.
 
-    $ ./demo1.out <a text file>
-
-Each line in the text file becomes a key. Duplicates are allowed. You may use "wh.c" for a quick test drive.
+    $ ./easydemo.out
 
 `concbench.out` is an example benchmarking tool of only 150 LoC. See the helper messages for more details.
 It generates six-word keys based on a word list (words.txt). See `sprintf` in `concbench.c`.
