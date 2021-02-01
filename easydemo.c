@@ -5,7 +5,9 @@
  */
 #include <stdio.h>
 
-#include "easywh.h"
+#include "lib.h"
+#include "kv.h"
+#include "wh.h"
 
   int
 main(int argc, char ** argv)
