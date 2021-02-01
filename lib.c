@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016--2020  Wu, Xingbo <wuxb45@gmail.com>
+ * Copyright (c) 2016--2021  Wu, Xingbo <wuxb45@gmail.com>
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
@@ -2066,30 +2066,49 @@ memlcp(const u8 * p1, const u8 * p2, const u32 max)
 // bitmap {{{
 // Partially thread-safe bitmap; call it Eventual Consistency?
 struct bitmap {
-  u64 bits;
-  au64 ones;
-  au64 bm[];
+  u64 nbits;
+  u64 nbytes; // must be a multiple of 8
+  union {
+    u64 ones;
+    au64 ones_a;
+  };
+  u64 bm[0];
 };
 
-  inline struct bitmap *
-bitmap_create(const u64 bits)
+  inline void
+bitmap_init(struct bitmap * const bm, const u64 nbits)
 {
-  struct bitmap * const bm = calloc(1, sizeof(*bm) + (bits_round_up(bits, 6) >> 3));
-  bm->bits = bits;
+  bm->nbits = nbits;
+  bm->nbytes = bits_round_up(nbits, 6) >> 3;
   bm->ones = 0;
+  bitmap_set_all0(bm);
+}
+
+  inline struct bitmap *
+bitmap_create(const u64 nbits)
+{
+  const u64 nbytes = bits_round_up(nbits, 6) >> 3;
+  struct bitmap * const bm = malloc(sizeof(*bm) + nbytes);
+  bitmap_init(bm, nbits);
   return bm;
+}
+
+  static inline bool
+bitmap_test_internal(const struct bitmap * const bm, const u64 idx)
+{
+  return (bm->bm[idx >> 6] & (1lu << (idx & 0x3flu))) != 0;
 }
 
   inline bool
 bitmap_test(const struct bitmap * const bm, const u64 idx)
 {
-  return (idx < bm->bits) && (bm->bm[idx >> 6] & (1lu << (idx & 0x3flu)));
+  return (idx < bm->nbits) && bitmap_test_internal(bm, idx);
 }
 
   inline bool
 bitmap_test_all1(struct bitmap * const bm)
 {
-  return bm->ones == bm->bits;
+  return bm->ones == bm->nbits;
 }
 
   inline bool
@@ -2101,8 +2120,8 @@ bitmap_test_all0(struct bitmap * const bm)
   inline void
 bitmap_set1(struct bitmap * const bm, const u64 idx)
 {
-  if ((idx < bm->bits) && !bitmap_test(bm, idx)) {
-    debug_assert(bm->ones < bm->bits);
+  if ((idx < bm->nbits) && !bitmap_test_internal(bm, idx)) {
+    debug_assert(bm->ones < bm->nbits);
     bm->bm[idx >> 6] |= (1lu << (idx & 0x3flu));
     bm->ones++;
   }
@@ -2111,10 +2130,32 @@ bitmap_set1(struct bitmap * const bm, const u64 idx)
   inline void
 bitmap_set0(struct bitmap * const bm, const u64 idx)
 {
-  if ((idx < bm->bits) && bitmap_test(bm, idx)) {
-    debug_assert(bm->ones && (bm->ones <= bm->bits));
+  if ((idx < bm->nbits) && bitmap_test_internal(bm, idx)) {
+    debug_assert(bm->ones && (bm->ones <= bm->nbits));
     bm->bm[idx >> 6] &= ~(1lu << (idx & 0x3flu));
     bm->ones--;
+  }
+}
+
+// for ht: each thread has exclusive access to a 64-bit range but updates concurrently
+// use atomic +/- to update bm->ones_a
+  inline void
+bitmap_set1_safe64(struct bitmap * const bm, const u64 idx)
+{
+  if ((idx < bm->nbits) && !bitmap_test_internal(bm, idx)) {
+    debug_assert(bm->ones < bm->nbits);
+    bm->bm[idx >> 6] |= (1lu << (idx & 0x3flu));
+    (void)atomic_fetch_add_explicit(&bm->ones_a, 1, MO_RELAXED);
+  }
+}
+
+  inline void
+bitmap_set0_safe64(struct bitmap * const bm, const u64 idx)
+{
+  if ((idx < bm->nbits) && bitmap_test_internal(bm, idx)) {
+    debug_assert(bm->ones && (bm->ones <= bm->nbits));
+    bm->bm[idx >> 6] &= ~(1lu << (idx & 0x3flu));
+    (void)atomic_fetch_sub_explicit(&bm->ones_a, 1, MO_RELAXED);
   }
 }
 
@@ -2127,34 +2168,25 @@ bitmap_count(struct bitmap * const bm)
   inline u64
 bitmap_first(struct bitmap * const bm)
 {
-  debug_assert(bm->ones);
-  for (u64 i = 0; (i << 6) < bm->bits; i++) {
+  for (u64 i = 0; (i << 6) < bm->nbits; i++) {
     if (bm->bm[i])
       return (i << 6) + __builtin_ctzl(bm->bm[i]);
   }
-
   debug_die();
 }
 
   inline void
 bitmap_set_all1(struct bitmap * const bm)
 {
-  memset(bm->bm, 0xff, bits_round_up(bm->bits, 6) >> 3);
-  bm->ones = bm->bits;
+  memset(bm->bm, 0xff, bm->nbytes);
+  bm->ones = bm->nbits;
 }
 
   inline void
 bitmap_set_all0(struct bitmap * const bm)
 {
-  memset(bm->bm, 0, bits_round_up(bm->bits, 6) >> 3);
+  memset(bm->bm, 0, bm->nbytes);
   bm->ones = 0;
-}
-
-  inline void
-bitmap_static_init(struct bitmap * const bm, const u64 bits)
-{
-  bm->bits = bits;
-  bitmap_set_all0(bm);
 }
 // }}} bitmap
 
@@ -2170,7 +2202,7 @@ bf_create(const u64 bpk, const u64 nkeys)
   const u64 nbits = bpk * nkeys;
   struct bf * const bf = malloc(sizeof(*bf) + (bits_round_up(nbits, 6) >> 3));
   bf->nr_probe = (u64)(log(2.0) * (double)bpk);
-  bitmap_static_init(&(bf->bitmap), nbits);
+  bitmap_init(&(bf->bitmap), nbits);
   return bf;
 }
 
@@ -2185,7 +2217,7 @@ bf_add(struct bf * const bf, u64 hash64)
 {
   u64 t = hash64;
   const u64 inc = bf_inc(hash64);
-  const u64 bits = bf->bitmap.bits;
+  const u64 bits = bf->bitmap.nbits;
   for (u64 i = 0; i < bf->nr_probe; i++) {
     bitmap_set1(&(bf->bitmap), t % bits);
     t += inc;
@@ -2197,7 +2229,7 @@ bf_test(const struct bf * const bf, u64 hash64)
 {
   u64 t = hash64;
   const u64 inc = bf_inc(hash64);
-  const u64 bits = bf->bitmap.bits;
+  const u64 bits = bf->bitmap.nbits;
   for (u64 i = 0; i < bf->nr_probe; i++) {
     if (!bitmap_test(&(bf->bitmap), t % bits))
       return false;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016--2020  Wu, Xingbo <wuxb45@gmail.com>
+ * Copyright (c) 2016--2021  Wu, Xingbo <wuxb45@gmail.com>
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
@@ -47,6 +47,9 @@ static_assert(sizeof(as64) == 8, "sizeof(as64)");
 
 #if defined(__x86_64__)
 typedef __m128i m128;
+#if defined(__AVX2__)
+typedef __m256i m256;
+#endif // __AVX2__
 #elif defined(__aarch64__)
 typedef uint8x16_t m128;
 #endif

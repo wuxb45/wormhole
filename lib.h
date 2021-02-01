@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016--2020  Wu, Xingbo <wuxb45@gmail.com>
+ * Copyright (c) 2016--2021  Wu, Xingbo <wuxb45@gmail.com>
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
@@ -489,7 +489,10 @@ memlcp(const u8 * p1, const u8 * p2, const u32 max);
 struct bitmap;
 
   extern struct bitmap *
-bitmap_create(const u64 bits);
+bitmap_create(const u64 nbits);
+
+  extern void
+bitmap_init(struct bitmap * const bm, const u64 nbits);
 
   extern bool
 bitmap_test(const struct bitmap * const bm, const u64 idx);
@@ -506,6 +509,12 @@ bitmap_set1(struct bitmap * const bm, const u64 idx);
   extern void
 bitmap_set0(struct bitmap * const bm, const u64 idx);
 
+  extern void
+bitmap_set1_safe64(struct bitmap * const bm, const u64 idx);
+
+  extern void
+bitmap_set0_safe64(struct bitmap * const bm, const u64 idx);
+
   extern u64
 bitmap_count(struct bitmap * const bm);
 
@@ -517,9 +526,6 @@ bitmap_set_all1(struct bitmap * const bm);
 
   extern void
 bitmap_set_all0(struct bitmap * const bm);
-
-  extern void
-bitmap_static_init(struct bitmap * const bm, const u64 bits);
 // }}} bitmap
 
 // bloom filter {{{
