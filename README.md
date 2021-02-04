@@ -58,6 +58,8 @@ It generates six-word keys based on a word list (words.txt). See `sprintf` in `c
 
 # The code
 
+You may not need to read the following details if the simple and thread-safe interface used by `easydemo.c` can meet your requirements.
+
 ## `struct kv` and `struct kref`
 
 Please refer to demo1.c for quick examples of how to manipulate the *key-value* (`struct kv`)
@@ -315,6 +317,7 @@ This `struct kvmap_mm` structure shows an example:
 
 Each of the in/out/free functions can be freely customized.
 A few `kvmap_mm_*` functions are already provided for common scenarios.
+`kvmap_mm_ndf` is identical to the `kvmap_mm_ualloc` structure in the above example.
 
 ## Hugepages
 Wormhole uses hugepages when available. To reserve some hugepages in Linux (10000 * 2MB):
