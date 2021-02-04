@@ -2,14 +2,16 @@
 
 The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered Index for In-memory Data Management"](https://www.cs.uic.edu/~wuxb/papers/wormhole.pdf)
 by Xingbo Wu, Fan Ni, and Song Jiang ([ACM DL](https://dl.acm.org/citation.cfm?id=3303955)).
+This repository maintains a reference implementation of the Wormhole index structure.
 
-This repository maintains a reference implementation of the Wormhole index structure on x86\_64 Linux/FreeBSD with SSE 4.2.
-The implementation has been well tuned on Xeon E5-26xx v4 CPUs with some aggressive optimizations.
-
-Experimental ARM64(AArch64) support has been added. The code has not been optimized for ARM64.
+It supports Linux/FreeBSD/MacOS on x86\_64 and AArch64 CPUs.
+On x86\_64, Wormhole requires SSE4.2.
+On AArch64, Wormhole requires NEON SIMD and the `crc` features on the target CPU.
+The code has been tested with Intel Haswell, Broadwell, and Skylake CPUs.
+It has also been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a Jetson Nano running 64-bit Ubuntu Groovy.
 
 ## NEWS
-* `wh.h` now provides a user-friendly interface. See `easydemo.c` for coding examples.
+* `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples.
 * The `whsafe` API is a *worry-free* thread-safe wormhole API.
 At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
 * `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
@@ -24,9 +26,7 @@ See below for more details.
 
 # Build
 
-## x86\_64
-Wormhole supports 64-bit x86\_64 CPUs running Linux, FreeBSD, or Darwin (Mac OS X).
-Clang is the default compiler. It can be changed to gcc in `Makefile` (`$ make CCC=gcc`).
+Clang is the default compiler. It can compile with gcc with `$ make CCC=gcc`.
 On our testbed, Clang usually produces faster code than GCC.
 
 To build:
@@ -37,17 +37,13 @@ Alternatively, you may use `O=0g` to enable debug info and disable optimizations
 
     $ make O=0g
 
-Read `Makefile.common` for options on optimization and debugging levels (O=).
-
-## AArch64
-
-Wormhole supports 64-bit ARM CPUs (AArch64). The currect implementation requires NEON SIMD and the `crc` features on the target CPU.
-The code has been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a Jetson Nano running Ubuntu Groovy.
-
 ## Sample programs
 `easydemo.c` presents how to use wormhole through a user-friendly API declared at the end of `wh.h`.
 
     $ ./easydemo.out
+
+The `wh_{ref/unref/get/set/del/probe}` and  `wh_iter_{create/destroy/seek/skip/peek/park/valid}` functions are all thread-safe.
+Each thread should acquire a private reference using `wh_ref` for KV operations.
 
 `concbench.out` is an example benchmarking tool of only 150 LoC. See the helper messages for more details.
 It generates six-word keys based on a word list (words.txt). See `sprintf` in `concbench.c`.
