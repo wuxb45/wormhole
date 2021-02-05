@@ -68,14 +68,17 @@ endif
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
   LIB += rt
+  LIB += uring
 else ifeq ($(UNAME_S),FreeBSD)
   LIB += rt
   LIB += execinfo
+  TPUT := /usr/local/bin/tput
 else ifeq ($(UNAME_S),Darwin)
   # do nothing
 else
   # TODO
 endif
+TPUT ?= tput
 
 CCC ?= clang
 CSTD = -std=gnu18
@@ -107,7 +110,13 @@ FLG += -fmax-errors=3
 FLG += -Wno-unknown-pragmas
 endif
 
-.PHONY : bin dis clean cleanall check tags
+uniq = $(if $1,$(firstword $1) $(call uniq,$(filter-out $(firstword $1),$1)))
+magentatxt := $(shell $(TPUT) setaf 5)
+greentxt := $(shell $(TPUT) setaf 2)
+bluetxt := $(shell $(TPUT) setaf 4)
+normaltxt := $(shell $(TPUT) sgr0)
+
+.PHONY : bin dis clean cleanx check tags
 
 bin : $(BIN)
 dis : $(DIS) bin
@@ -118,16 +127,18 @@ ifeq ($(J),o)
 # DANGER. Don't use unless it works!
 # build from .o files but target-specific flags are missing in %.o : %.x
 %.out : %.o $(OBJ) $$(addsuffix .o,$$(SRC-$$@) $$(MOD-$$@) $$(ASM-$$@))
-	$(eval ALLFLG := $(FLG) $(FLG-$*) $(FLG-$*.o) $(FLG-$@) -rdynamic)
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) $(FLG-$@) -rdynamic)
 	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
-	$(CCC) $(CSTD) $(EXTRA) $(ALLFLG) -o $@ $^ $(ALLLIB)
+	$(CCC) $(ALLFLG) -o $@ $^ $(ALLLIB)
 #
 else # default: all-in-one command
 %.out : %.c $(SRC) $(ASM) $(DEP) $$(DEP-$$@) $$(addsuffix .c,$$(SRC-$$@) $$(MOD-$$@)) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@)) $$(addsuffix .S,$$(ASM-$$@))
 	$(eval ALLSRC := $(SRC) $(addsuffix .c,$(SRC-$@) $(MOD-$@)) $(ASM) $(addsuffix .S,$(ASM-$@)))
-	$(eval ALLFLG := $(FLG) $(FLG-$@) -rdynamic)
+	$(eval UNIQSRC := $(call uniq,$(ALLSRC)))
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) $(FLG-$@) -rdynamic)
 	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
-	$(CCC) $(CSTD) $(EXTRA) $(ALLFLG) -o $@ $< $(ALLSRC) $(ALLLIB)
+	@printf '$(bluetxt)$@$(magentatxt) <= $(greentxt)$< $(UNIQSRC)$(normaltxt)\n'
+	$(CCC) $(ALLFLG) -o $@ $< $(UNIQSRC) $(ALLLIB)
 #
 endif
 
@@ -148,10 +159,10 @@ endif
 	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) -S -o $@ -c $<
 
 clean :
-	rm -rf *.out *.dis *.o *.so *.gcda *.gcno *.gcov
+	rm -rf *.out *.dis *.o *.so *.gcda *.gcno *.gcov *.dSYM
 
-cleanall :
-	rm -rf *.out *.dis *.o $(EXTERNDEP) $(EXTERNSRC)
+cleanx : clean
+	rm -rf $(EXTERNDEP) $(EXTERNSRC)
 
 ifeq ($(CCC),gcc)
   CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
