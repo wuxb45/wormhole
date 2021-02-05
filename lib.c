@@ -127,7 +127,7 @@ cpu_pause(void)
 #if defined(__x86_64__)
   _mm_pause();
 #elif defined(__aarch64__)
-  __yield();
+  // nop
 #endif
 }
 
@@ -971,7 +971,7 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
 
   // restore original affinity
   thread_setaffinity_set(&set0);
-  if (fji.ferr || fji.jerr) // cppcheck-suppress knownConditionTrueFalse
+  if (fji.ferr || fji.jerr)
     fprintf(stderr, "%s errors: fork %lu join %lu\n", __func__, fji.ferr, fji.jerr);
   return dt;
 }
@@ -999,9 +999,9 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 // spinlock {{{
 #if defined(__linux__)
 static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
-#else
+#else // __linux__
 static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
-#endif
+#endif // __linux__
 
   inline void
 spinlock_init(spinlock * const lock)
@@ -1009,7 +1009,7 @@ spinlock_init(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_init(p, PTHREAD_PROCESS_PRIVATE);
-#else
+#else // __linux__
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
 #endif // __linux__
@@ -1022,11 +1022,11 @@ spinlock_lock(spinlock * const lock)
 #pragma nounroll
   while (!spinlock_trylock(lock))
     corr_yield();
-#else
+#else // CORR
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_lock(p); // return value ignored
-#else
+#else // __linux__
   au32 * const p = (typeof(p))lock;
   do {
     if (atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0)
@@ -1045,7 +1045,7 @@ spinlock_trylock(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   return !pthread_spin_trylock(p);
-#else
+#else // __linux__
   au32 * const p = (typeof(p))lock;
   return atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0;
 #endif // __linux__
@@ -1057,7 +1057,7 @@ spinlock_unlock(spinlock * const lock)
 #if defined(__linux__)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_unlock(p); // return value ignored
-#else
+#else // __linux__
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
 #endif // __linux__
@@ -1423,7 +1423,7 @@ asm (
     ".global _co_switch_stack;"
     "_co_switch_stack:"
 #else
-#error supported platforms: Linux/FreeBSD/Apple
+#error Supported platforms: Linux/FreeBSD/Apple
 #endif // OS
     "push %rbp; push %rbx; push %r12;"
     "push %r13; push %r14; push %r15;"
@@ -2814,7 +2814,7 @@ strhex_32(void * const out, u32 v)
   _mm_storel_epi64(out, _mm_srli_si128(str, 8));
 #elif defined(__aarch64__)
   const m128 str = strhex_helper((u64)v);
-  vst1q_lane_u64(out, str, 1);
+  vst1q_lane_u64(out, vreinterpretq_u64_u8(str), 1);
 #else
   u16 * const ptr = (typeof(ptr))out;
   for (u64 i = 0; i < 4; i++) {
@@ -3160,16 +3160,10 @@ vctr_destroy(struct vctr * const v)
 #define GEN_ASYNC  ((255))      // async gen
 
 struct rgen_linear { // 8x4
-  union {
-    au64 ac;
-    u64 uc;
-  };
+  union { au64 ac; u64 uc; };
   u64 base;
   u64 mod;
-  union {
-    s64 inc;
-    u64 inc_u64;
-  };
+  union { s64 inc; u64 inc_u64; };
 };
 
 struct rgen_expo { // 8
@@ -3275,7 +3269,6 @@ struct rgen {
 rgen_set_next(struct rgen * const gen, rgen_next_func next)
 {
   gen->next = next;
-  //gen->next_nowait = next;
   gen->next_nowait = NULL;
 }
 // }}} struct
@@ -3559,7 +3552,7 @@ struct zeta_range_info {
   u64 start;
   u64 count;
   double theta;
-  double sums[];
+  double sums[0];
 };
 
   static void *
@@ -3608,20 +3601,15 @@ zeta_range(const u64 start, const u64 count, const double theta)
 }
 
 static const u64 zetalist_u64[] = {0,
-  0x4040437dd948c1d9lu, 0x4040b8f8009bce85lu,
-  0x4040fe1121e564d6lu, 0x40412f435698cdf5lu,
-  0x404155852507a510lu, 0x404174d7818477a7lu,
-  0x40418f5e593bd5a9lu, 0x4041a6614fb930fdlu,
-  0x4041bab40ad5ec98lu, 0x4041cce73d363e24lu,
-  0x4041dd6239ebabc3lu, 0x4041ec715f5c47belu,
-  0x4041fa4eba083897lu, 0x4042072772fe12bdlu,
-  0x4042131f5e380b72lu, 0x40421e53630da013lu,
+  0x4040437dd948c1d9lu, 0x4040b8f8009bce85lu, 0x4040fe1121e564d6lu, 0x40412f435698cdf5lu,
+  0x404155852507a510lu, 0x404174d7818477a7lu, 0x40418f5e593bd5a9lu, 0x4041a6614fb930fdlu,
+  0x4041bab40ad5ec98lu, 0x4041cce73d363e24lu, 0x4041dd6239ebabc3lu, 0x4041ec715f5c47belu,
+  0x4041fa4eba083897lu, 0x4042072772fe12bdlu, 0x4042131f5e380b72lu, 0x40421e53630da013lu,
 };
 
 static const double * zetalist_double = (typeof(zetalist_double))zetalist_u64;
 static const u64 zetalist_step = 0x10000000000lu;
 static const u64 zetalist_count = 16;
-//static const double zetalist_theta = 0.99;
 
   static double
 zeta(const u64 n, const double theta)
@@ -3697,7 +3685,6 @@ gen_unizipf(struct rgen * const gi)
   // scattered hot spots
   const u64 z = gen_zipfian(gi);
   const u64 u = (random_u64() % gi->unizipf.usize) * gi->unizipf.zsize;
-
   return gi->unizipf.base + z + u;
 }
 
@@ -3707,7 +3694,6 @@ gen_zipfuni(struct rgen * const gi)
   // aggregated hot spots
   const u64 z = gen_zipfian(gi) * gi->unizipf.usize;
   const u64 u = random_u64() % gi->unizipf.usize;
-
   return gi->unizipf.base + z + u;
 }
 
@@ -3838,24 +3824,22 @@ rgen_next(struct rgen * const gen)
   inline u64
 rgen_next_nowait(struct rgen * const gen)
 {
-  debug_assert(gen->next_nowait);
   return gen->next_nowait(gen);
 }
 
   inline u64
 rgen_next_write(struct rgen * const gen)
 {
-  debug_assert(gen->next_write);
   return gen->next_write(gen);
 }
 
   static void
 rgen_async_clean_buffers(struct rgen_async * const as)
 {
-  if (as->mem == NULL)
-    return;
-  pages_unmap(as->mem, RGEN_ABUF_SZ);
-  as->mem = NULL;
+  if (as->mem) {
+    pages_unmap(as->mem, RGEN_ABUF_SZ);
+    as->mem = NULL;
+  }
 }
 
   void
@@ -3898,57 +3882,54 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
 {
   if ((argc < 1) || (strcmp("rgen", argv[0]) != 0))
     return -1;
-  struct rgen * gen = NULL;
-  int ret = -1;
 
   if ((0 == strcmp(argv[1], "const")) && (argc >= 3)) {
-    gen = rgen_new_const(a2u64(argv[2]));
-    ret = 3;
+    *gen_out = rgen_new_const(a2u64(argv[2]));
+    return 3;
   } else if ((0 == strcmp(argv[1], "expo")) && (argc >= 4)) {
-    gen = rgen_new_expo(atof(argv[2]), atof(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_expo(atof(argv[2]), atof(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "uniform")) && (argc >= 4)) {
-    gen = rgen_new_uniform(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_uniform(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "zipfian")) && (argc >= 4)) {
-    gen = rgen_new_zipfian(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_zipfian(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "xzipfian")) && (argc >= 4)) {
-    gen = rgen_new_xzipfian(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_xzipfian(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "unizipf")) && (argc >= 5)) {
-    gen = rgen_new_unizipf(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
-    ret = 5;
+    *gen_out = rgen_new_unizipf(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
+    return 5;
   } else if ((0 == strcmp(argv[1], "zipfuni")) && (argc >= 5)) {
-    gen = rgen_new_zipfuni(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
-    ret = 5;
+    *gen_out = rgen_new_zipfuni(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
+    return 5;
   } else if ((0 == strcmp(argv[1], "latest")) && (argc >= 3)) {
-    gen = rgen_new_latest(a2u64(argv[2]));
-    ret = 3;
+    *gen_out = rgen_new_latest(a2u64(argv[2]));
+    return 3;
   } else if ((0 == strcmp(argv[1], "incs")) && (argc >= 4)) {
-    gen = rgen_new_incs(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_incs(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "incu")) && (argc >= 4)) {
-    gen = rgen_new_incu(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_incu(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "decs")) && (argc >= 4)) {
-    gen = rgen_new_decs(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_decs(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "decu")) && (argc >= 4)) {
-    gen = rgen_new_decu(a2u64(argv[2]), a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_decu(a2u64(argv[2]), a2u64(argv[3]));
+    return 4;
   } else if ((0 == strcmp(argv[1], "skips")) && (argc >= 5)) {
-    gen = rgen_new_skips(a2u64(argv[2]), a2u64(argv[3]), a2s64(argv[4]));
-    ret = 5;
+    *gen_out = rgen_new_skips(a2u64(argv[2]), a2u64(argv[3]), a2s64(argv[4]));
+    return 5;
   } else if ((0 == strcmp(argv[1], "skipu")) && (argc >= 5)) {
-    gen = rgen_new_skipu(a2u64(argv[2]), a2u64(argv[3]), a2s64(argv[4]));
-    ret = 5;
+    *gen_out = rgen_new_skipu(a2u64(argv[2]), a2u64(argv[3]), a2s64(argv[4]));
+    return 5;
   } else if ((0 == strcmp(argv[1], "trace32")) && (argc >= 4)) {
-    gen = rgen_new_trace32(argv[2], a2u64(argv[3]));
-    ret = 4;
+    *gen_out = rgen_new_trace32(argv[2], a2u64(argv[3]));
+    return 4;
   }
-  *gen_out = gen;
-  return ret;
+  return -1;
 }
 // }}} rgen helper
 
@@ -3982,7 +3963,6 @@ rgen_async_worker(void * const ptr)
       as->avail[i] = true;
     }
   }
-  return NULL;
 }
 
   static void
@@ -4005,10 +3985,8 @@ rgen_async_wait(struct rgen * const gen)
 rgen_async_wait_all(struct rgen * const gen)
 {
   if (gen->type == GEN_ASYNC) {
-    rgen_async_wait_at(gen, 0);
-    rgen_async_wait_at(gen, 1);
-    rgen_async_wait_at(gen, 2);
-    rgen_async_wait_at(gen, 3);
+    for (u32 i = 0; i < 4; i++)
+      rgen_async_wait_at(gen, i);
   }
 }
 
@@ -4111,7 +4089,6 @@ rgen_async_create_mem_worker(void * const ptr)
   struct rgen *
 rgen_async_create(struct rgen * const gen0, const u32 cpu)
 {
-  // TODO: async on async might just work?
   if (gen0 == NULL || gen0->type == GEN_ASYNC)
     return NULL;
 
@@ -4152,12 +4129,6 @@ rgen_async_create(struct rgen * const gen0, const u32 cpu)
     return NULL;
   }
 }
-
-#undef RGEN_ABUF_NR
-#undef RGEN_ABUF_SZ
-#undef RGEN_ABUF_SZ1
-#undef RGEN_ABUF_NR1_32
-#undef RGEN_ABUF_NR1_64
 // }}} async
 
 // }}} rgen
@@ -4474,7 +4445,7 @@ qsbr_wait(struct qsbr * const q, const u64 target)
       struct qshard * const shard = &(q->shards[i]);
       const u64 bits1 = atomic_load_explicit(&(shard->bitmap), MO_CONSUME);
       for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
-        const u64 bit = bits & -bits; // cppcheck-suppress oppositeExpression
+        const u64 bit = bits & -bits;
         if (((bits1 & bit) == 0) ||
             (atomic_load_explicit(&(shard->ptrs[__builtin_ctzl(bit)]->qstate), MO_CONSUME) == target))
           bms[i] &= ~bit;
