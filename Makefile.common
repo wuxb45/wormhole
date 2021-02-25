@@ -67,16 +67,18 @@ endif
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
+  CHECK_S := -D__linux__
   LIB += rt
-  LIB += uring
 else ifeq ($(UNAME_S),FreeBSD)
+  CHECK_S := -D__FreeBSD__
   LIB += rt
   LIB += execinfo
   TPUT := /usr/local/bin/tput
 else ifeq ($(UNAME_S),Darwin)
+  CHECK_S := -D__APPLE__ -D__MACH__
   # do nothing
 else
-  # TODO
+  $(error "Supported Platforms: Linux, FreeBSD, Darwin")
 endif
 TPUT ?= tput
 
@@ -85,11 +87,15 @@ CSTD = -std=gnu18
 XCC ?= clang++
 XSTD = -std=gnu++17
 
-ISA := $(shell uname -m)
-ifeq ($(ISA),aarch64) # "native" does not work for clang@aarch64
-ARCH ?= armv8-a+crc
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),aarch64) # "native" does not work for clang@aarch64
+  CHECK_M := -D__aarch64__
+  ARCH ?= armv8-a+crc
+else ifeq ($(UNAME_M),x86_64)
+  CHECK_M := -D__x86_64__
+  ARCH ?= native
 else
-ARCH ?= native
+  $(error "Supported Platforms: aarch64, x86_64")
 endif
 
 TUNE ?= native
@@ -109,6 +115,26 @@ else ifeq ($(CCC),gcc)
 FLG += -fmax-errors=3
 FLG += -Wno-unknown-pragmas
 endif
+
+ifeq ($(CCC),clang)
+  CCINST = /usr/lib/clang/$(shell clang --version | awk '/^clang/ { print $$3 }')
+  CCINC = $(CCINST)/include
+else ifeq ($(CCC),gcc)
+  CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
+  CCINC = $(CCINST)/include $(CCINST)/include-fixed
+endif
+CCINC = /usr/include /usr/local/include
+
+ifneq ($(shell find $(CCINC) -name backtrace-supported.h 2>/dev/null),)
+  LIB += backtrace
+  FLG += -DBACKTRACE
+endif
+
+ifneq ($(shell find $(CCINC) -name liburing.h 2>/dev/null),)
+  LIB += uring
+  FLG += -DLIBURING
+endif
+
 
 uniq = $(if $1,$(firstword $1) $(call uniq,$(filter-out $(firstword $1),$1)))
 magentatxt := $(shell $(TPUT) setaf 5)
@@ -164,17 +190,9 @@ clean :
 cleanx : clean
 	rm -rf $(EXTERNDEP) $(EXTERNSRC)
 
-ifeq ($(CCC),gcc)
-  CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
-  CCINC = $(CCINST)/include $(CCINST)/include-fixed
-else ifeq ($(CCC),clang)
-  CCINST = /usr/lib/clang/$(shell clang --version | awk '/^clang/ { print $$3 }')
-  CCINC = $(CCINST)/include
-endif
-
 check :
-	cppcheck -I /usr/include -I /usr/local/include $(addprefix -I ,$(CCINC)) \
-    -q -D__x86_64__=1 -DNDEBUG -U__cplusplus \
+	cppcheck $(addprefix -I ,$(CCINC)) \
+    -q $(CHECK_M) $(CHECK_S) -DNDEBUG -U__cplusplus \
     --std=c11 --language=c --platform=unix64 \
     --enable=warning,style,performance,portability,information --inline-suppr .
 

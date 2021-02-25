@@ -4,9 +4,6 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // includes {{{
 // C headers
@@ -31,6 +28,10 @@ extern "C" {
 #include <sys/stat.h>
 #include <sys/types.h>
 // }}} includes
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // types {{{
 typedef char            s8;
@@ -451,9 +452,17 @@ bits_round_down(const u64 v, const u8 power);
 
   extern u64
 bits_round_down_a(const u64 v, const u64 a);
+// }}} bits
 
+// vi128 {{{
   extern u32
 vi128_estimate_u32(const u32 v);
+
+  extern u8 *
+vi128_encode_u32(u8 * dst, u32 v);
+
+  extern const u8 *
+vi128_decode_u32(const u8 * src, u32 * const out);
 
   extern u32
 vi128_estimate_u64(const u64 v);
@@ -461,15 +470,9 @@ vi128_estimate_u64(const u64 v);
   extern u8 *
 vi128_encode_u64(u8 * dst, u64 v);
 
-  extern u8 *
-vi128_encode_u32(u8 * dst, u32 v);
-
   extern const u8 *
 vi128_decode_u64(const u8 * src, u64 * const out);
-
-  extern const u8 *
-vi128_decode_u32(const u8 * src, u32 * const out);
-// }}} bits
+// }}} vi128
 
 // misc {{{
   extern void *
@@ -593,6 +596,20 @@ slab_get_nready(struct slab * const slab);
   extern void
 slab_destroy(struct slab * const slab);
 // }}}  slab
+
+// mpool {{{
+  extern struct mpool *
+mpool_create(void);
+
+  extern void
+mpool_destroy(struct mpool * const mp);
+
+  extern void *
+mpool_alloc(struct mpool * const mp, const size_t sz);
+
+  extern void
+mpool_free(struct mpool * const mp, void * const ptr);
+// }}} mpool
 
 // qsort {{{
   extern int

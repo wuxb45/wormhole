@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#include <malloc.h>  // malloc_usable_size
 
 #if defined(__linux__)
 #include <linux/fs.h>
@@ -291,16 +292,66 @@ watch_u64_usr1(u64 * const ptr)
   }
 }
 
+static void * debug_bt_state = NULL;
+#if defined(BACKTRACE) && defined(__linux__)
+// TODO: get exec path on MacOS and FreeBSD
+
+#include <backtrace.h>
+static char debug_filepath[1024] = {};
+
   static void
-debug_wait_gdb(void)
+debug_bt_error_cb(void * const data, const char * const msg, const int errnum)
 {
-  void *array[64];
-  const int size = backtrace(array, 64);
-  dprintf(2, "Backtrace (%d):\n", size);
-  backtrace_symbols_fd(array + 1, size, 2);
+  (void)data;
+  dprintf(2, "libbacktrace: %s %s\n", msg, strerror(errnum));
+}
+
+  static int
+debug_bt_print_cb(void * const data, const uintptr_t pc,
+    const char * const file, const int lineno, const char * const func)
+{
+  u32 * const plevel = (typeof(plevel))data;
+  if (file || func || lineno) {
+    dprintf(2, "[%u]0x%012lx " TERMCLR(35) "%s" TERMCLR(31) ":" TERMCLR(34) "%d" TERMCLR(0)" %s\n",
+        *plevel, pc, file ? file : "???", lineno, func ? func : "???");
+  } else if (pc) {
+    dprintf(2, "[%u]0x%012lx\n", *plevel, pc);
+  }
+  (*plevel)++;
+  return strcmp(func, "main") == 0;
+}
+
+__attribute__((constructor))
+  static void
+debug_backtrace_init(void)
+{
+  const ssize_t len = readlink("/proc/self/exe", debug_filepath, 1023);
+  // disable backtrace
+  if (len < 0 || len >= 1023)
+    return;
+
+  debug_filepath[len] = '\0';
+  debug_bt_state = backtrace_create_state(debug_filepath, 1, debug_bt_error_cb, NULL);
+}
+#endif // BACKTRACE
+
+  static void
+debug_wait_gdb(void * const bt_state)
+{
+  if (bt_state) {
+#if defined(BACKTRACE)
+    dprintf(2, "Backtrace :\n");
+    u32 level = 0;
+    backtrace_full(debug_bt_state, 1, debug_bt_print_cb, debug_bt_error_cb, &level);
+#endif // BACKTRACE
+  } else { // fallback to execinfo if no backtrace or initialization failed
+    void *array[64];
+    const int size = backtrace(array, 64);
+    dprintf(2, "Backtrace (%d):\n", size - 1);
+    backtrace_symbols_fd(array + 1, size - 1, 2);
+  }
 
   abool v = true;
-
   char timestamp[32];
   time_stamp(timestamp, 32);
   char threadname[32] = {};
@@ -332,7 +383,7 @@ debug_wait_gdb(void)
 debug_assert(const bool v)
 {
   if (!v)
-    debug_wait_gdb();
+    debug_wait_gdb(debug_bt_state);
 }
 #endif
 
@@ -340,7 +391,7 @@ __attribute__((noreturn))
   inline void
 debug_die(void)
 {
-  debug_wait_gdb();
+  debug_wait_gdb(debug_bt_state);
   exit(0);
 }
 
@@ -362,7 +413,7 @@ wait_gdb_handler(const int sig, siginfo_t * const info, void * const context)
   char buf[64] = "[SIGNAL] ";
   strcat(buf, strsignal(sig));
   write(2, buf, strlen(buf));
-  debug_wait_gdb();
+  debug_wait_gdb(NULL);
 }
 
 // setup hooks for catching fatal errors
@@ -386,7 +437,6 @@ debug_init(void)
     }
   }
 }
-#endif // !defined(NOSIGNAL)
 
 __attribute__((destructor))
   static void
@@ -399,6 +449,7 @@ debug_exit(void)
   if (oss.ss_sp)
     pages_unmap(oss.ss_sp, PGSZ * 16);
 }
+#endif // !defined(NOSIGNAL)
 
   void
 debug_dump_maps(FILE * const out)
@@ -998,21 +1049,25 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 
 // spinlock {{{
 #if defined(__linux__)
-static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
-#else // __linux__
-static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
+#define SPINLOCK_PTHREAD
 #endif // __linux__
 
-  inline void
+#if defined(SPINLOCK_PTHREAD)
+static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
+#else // SPINLOCK_PTHREAD
+static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
+#endif // SPINLOCK_PTHREAD
+
+  void
 spinlock_init(spinlock * const lock)
 {
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_init(p, PTHREAD_PROCESS_PRIVATE);
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 }
 
   inline void
@@ -1023,44 +1078,46 @@ spinlock_lock(spinlock * const lock)
   while (!spinlock_trylock(lock))
     corr_yield();
 #else // CORR
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_lock(p); // return value ignored
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
+#pragma nounroll
   do {
     if (atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0)
       return;
+#pragma nounroll
     do {
       cpu_pause();
     } while (atomic_load_explicit(p, MO_CONSUME));
   } while (true);
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 #endif // CORR
 }
 
   inline bool
 spinlock_trylock(spinlock * const lock)
 {
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   return !pthread_spin_trylock(p);
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
   return atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0;
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 }
 
   inline void
 spinlock_unlock(spinlock * const lock)
 {
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_unlock(p); // return value ignored
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 }
 // }}} spinlock
 
@@ -1879,71 +1936,45 @@ bits_round_down_a(const u64 v, const u64 a)
 {
   return v / a * a;
 }
+// }}} bits
 
-  inline u32
-vi128_estimate_u32(const u32 v)
-{
-  static const u8 t[] = {5,5,5,5,4,4,4,4,4,4,4,
-    3,3,3,3,3,3,3,2,2,2,2,2,2,2,1,1,1,1,1,1,1};
-  return v ? t[__builtin_clz(v)] : 1;
-  // 0 -> 1        clz
-  // 1 to 7 -> 1   31 to 25
-  // 8 to 14 -> 2  24 to 18
-  // 15 to 21 -> 3 17 to 11
-  // 22 to 28 -> 4 10 to 4
-  // 29 to 32 -> 5  3 to 0
-}
-
-  inline u32
-vi128_estimate_u64(const u64 v)
-{
-  return v ? ((70u - ((u32)__builtin_clzl(v))) / 7u) : 1;
-}
-
-// return ptr after the generated bytes
-  u8 *
-vi128_encode_u64(u8 * dst, u64 v)
-{
-  while (v >> 7) {
-    *(dst++) = (u8)(v | 0x80);
-    v >>= 7; // from low bits to high bits
-  }
-  *(dst++) = (u8)v;
-  return dst;
-}
-
-  u8 *
-vi128_encode_u32(u8 * dst, u32 v)
-{
-  //while (v >> 7) {
-  //  *(dst++) = (((u8)v) & 0x7f) | 0x80;
-  //  v >>= 7; // from low bits to high bits
-  //}
-  //*(dst++) = (u8)v;
-
+// vi128 {{{
 #if defined(__GNUC__) && __GNUC__ >= 7
 #define FALLTHROUGH __attribute__ ((fallthrough))
 #else
 #define FALLTHROUGH ((void)0)
 #endif /* __GNUC__ >= 7 */
 
+  inline u32
+vi128_estimate_u32(const u32 v)
+{
+  static const u8 t[] = {5,5,5,5,
+    4,4,4,4,4,4,4, 3,3,3,3,3,3,3,
+    2,2,2,2,2,2,2, 1,1,1,1,1,1,1};
+  return v ? t[__builtin_clz(v)] : 2;
+  // 0 -> [0x80 0x00] the first byte is non-zero
+
+  // nz bit range -> enc length    offset in t[]
+  // 0 -> 2          special case
+  // 1 to 7 -> 1     31 to 25
+  // 8 to 14 -> 2    24 to 18
+  // 15 to 21 -> 3   17 to 11
+  // 22 to 28 -> 4   10 to 4
+  // 29 to 32 -> 5    3 to 0
+}
+
+  u8 *
+vi128_encode_u32(u8 * dst, u32 v)
+{
   switch (vi128_estimate_u32(v)) {
   case 5:
-    *(dst++) = (u8)(v | 0x80);
-    v >>= 7;
-    FALLTHROUGH;
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
   case 4:
-    *(dst++) = (u8)(v | 0x80);
-    v >>= 7;
-    FALLTHROUGH;
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
   case 3:
-    *(dst++) = (u8)(v | 0x80);
-    v >>= 7;
-    FALLTHROUGH;
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
   case 2:
-    *(dst++) = (u8)(v | 0x80);
-    v >>= 7;
-    FALLTHROUGH;
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
   case 1:
     *(dst++) = (u8)v;
     break;
@@ -1952,7 +1983,66 @@ vi128_encode_u32(u8 * dst, u32 v)
     break;
   }
   return dst;
-#undef FALLTHROUGH
+}
+
+  const u8 *
+vi128_decode_u32(const u8 * src, u32 * const out)
+{
+  debug_assert(*src);
+  u32 r = 0;
+  for (u32 shift = 0; shift < 32; shift += 7) {
+    const u8 byte = *(src++);
+    r |= (((u32)(byte & 0x7f)) << shift);
+    if ((byte & 0x80) == 0) { // No more bytes to consume
+      *out = r;
+      return src;
+    }
+  }
+  *out = 0;
+  return NULL; // invalid
+}
+
+  inline u32
+vi128_estimate_u64(const u64 v)
+{
+  static const u8 t[] = {10,
+    9,9,9,9,9,9,9, 8,8,8,8,8,8,8, 7,7,7,7,7,7,7,
+    6,6,6,6,6,6,6, 5,5,5,5,5,5,5, 4,4,4,4,4,4,4,
+    3,3,3,3,3,3,3, 2,2,2,2,2,2,2, 1,1,1,1,1,1,1};
+  return v ? t[__builtin_clzl(v)] : 2;
+}
+
+// return ptr after the generated bytes
+  u8 *
+vi128_encode_u64(u8 * dst, u64 v)
+{
+  switch (vi128_estimate_u64(v)) {
+  case 10:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 9:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 8:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 7:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 6:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 5:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 4:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 3:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 2:
+    *(dst++) = (u8)(v | 0x80); v >>= 7; FALLTHROUGH;
+  case 1:
+    *(dst++) = (u8)v;
+    break;
+  default:
+    debug_die();
+    break;
+  }
+  return dst;
 }
 
 // return ptr after the consumed bytes
@@ -1972,22 +2062,8 @@ vi128_decode_u64(const u8 * src, u64 * const out)
   return NULL; // invalid
 }
 
-  const u8 *
-vi128_decode_u32(const u8 * src, u32 * const out)
-{
-  u32 r = 0;
-  for (u32 shift = 0; shift < 32; shift += 7) {
-    const u8 byte = *(src++);
-    r |= (((u32)(byte & 0x7f)) << shift);
-    if ((byte & 0x80) == 0) { // No more bytes to consume
-      *out = r;
-      return src;
-    }
-  }
-  *out = 0;
-  return NULL; // invalid
-}
-// }}} bits
+#undef FALLTHROUGH
+// }}} vi128
 
 // misc {{{
   inline void *
@@ -2276,7 +2352,7 @@ oalloc_create(const size_t blksz)
 oalloc_alloc(struct oalloc * const o, const size_t size)
 {
   if ((o->curr + size) <= o->blksz) {
-    void * ret = o->mem + o->curr;
+    void * ret = ((u8 *)o->mem) + o->curr;
     o->curr += size;
     return ret;
   }
@@ -2305,19 +2381,109 @@ oalloc_destroy(struct oalloc * const o)
 }
 // }}} oalloc
 
+// astk {{{
+// atomic stack
+struct acell { struct acell * next; };
+
+// extract ptr from m value
+  static inline struct acell *
+astk_ptr(const u64 m)
+{
+  return (struct acell *)(m >> 16);
+}
+
+// calculate the new magic
+  static inline u64
+astk_m1(const u64 m0, struct acell * const ptr)
+{
+  return ((m0 + 1) & 0xfffflu) | (((u64)ptr) << 16);
+}
+
+// calculate the new magic
+  static inline u64
+astk_m1_unsafe(struct acell * const ptr)
+{
+  return ((u64)ptr) << 16;
+}
+
+  static bool
+astk_try_push(au64 * const pmagic, struct acell * const first, struct acell * const last)
+{
+  u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  last->next = astk_ptr(m0);
+  const u64 m1 = astk_m1(m0, first);
+  return atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_RELEASE, MO_RELAXED);
+}
+
+  static void
+astk_push_safe(au64 * const pmagic, struct acell * const first, struct acell * const last)
+{
+  while (!astk_try_push(pmagic, first, last));
+}
+
+  static void
+astk_push_unsafe(au64 * const pmagic, struct acell * const first,
+    struct acell * const last)
+{
+  const u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  last->next = astk_ptr(m0);
+  const u64 m1 = astk_m1_unsafe(first);
+  atomic_store_explicit(pmagic, m1, MO_RELAXED);
+}
+
+// can fail for two reasons: (1) NULL: no available object; (2) ~0lu: contention
+  static void *
+astk_try_pop(au64 * const pmagic)
+{
+  u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  struct acell * const ret = astk_ptr(m0);
+  if (ret == NULL)
+    return NULL;
+
+  const u64 m1 = astk_m1(m0, ret->next);
+  if (atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
+    return ret;
+  else
+    return (void *)(~0lu);
+}
+
+  static void *
+astk_pop_safe(au64 * const pmagic)
+{
+  do {
+    u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+    struct acell * const ret = astk_ptr(m0);
+    if (ret == NULL)
+      return NULL;
+
+    const u64 m1 = astk_m1(m0, ret->next);
+    if (atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
+      return ret;
+  } while (true);
+}
+
+  static void *
+astk_pop_unsafe(au64 * const pmagic)
+{
+  const u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  struct acell * const ret = astk_ptr(m0);
+  if (ret == NULL)
+    return NULL;
+
+  const u64 m1 = astk_m1_unsafe(ret->next);
+  atomic_store_explicit(pmagic, m1, MO_RELAXED);
+  return (void *)ret;
+}
+// }}} astk
+
 // slab {{{
 #define SLAB_OBJ0_OFFSET ((64))
-struct slab_object {
-  struct slab_object * next;
-};
-
 struct slab {
-  //struct slab_object * obj_head;
   au64 magic; // hi 48: ptr, lo 16: seq
   u64 padding1[7];
 
   // 2nd line
-  struct slab_object * blk_head; // list of all blocks
+  struct acell * blk_head; // list of all blocks
   u64 nalloc; // UNSAFE!
   u64 nready; // UNSAFE!
   u64 obj_size; // const: aligned size of each object
@@ -2331,72 +2497,23 @@ struct slab {
 };
 
   static void
-slab_push_safe(struct slab * const slab, struct slab_object * const obj_head,
-    struct slab_object * const obj_last)
-{
-  do {
-    u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);;
-    obj_last->next = (void *)(m0 >> 16);
-    const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
-    if (atomic_compare_exchange_weak_explicit(&slab->magic, &m0, m1, MO_RELEASE, MO_RELAXED))
-      return;
-  } while (true);
-}
-
-  static void
-slab_push_unsafe(struct slab * const slab, struct slab_object * const obj_head,
-    struct slab_object * const obj_last)
-{
-  const u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
-  obj_last->next = (void *)(m0 >> 16);
-  const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
-  atomic_store_explicit(&slab->magic, m1, MO_RELAXED);
-}
-
-  static void *
-slab_pop_safe(struct slab * const slab)
-{
-  do {
-    u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
-    struct slab_object * const ret = (typeof(ret))(m0 >> 16);
-    if (ret == NULL)
-      return ret;
-    const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
-    if (atomic_compare_exchange_weak_explicit(&slab->magic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
-      return ret;
-  } while (true);
-}
-
-  static void *
-slab_pop_unsafe(struct slab * const slab)
-{
-  const u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
-  struct slab_object * const ret = (typeof(ret))(m0 >> 16);
-  if (ret == NULL)
-    return ret;
-  const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
-  atomic_store_explicit(&slab->magic, m1, MO_RELAXED);
-  return (void *)ret;
-}
-
-  static void
-slab_add_block(struct slab * const slab, struct slab_object * const blk, const bool safe)
+slab_add_block(struct slab * const slab, struct acell * const blk, const bool safe)
 {
   blk->next = slab->blk_head;
   slab->blk_head = blk;
 
   u8 * const base = ((u8 *)blk) + slab->obj0_offset;
-  struct slab_object * iter = (typeof(iter))base; // [0]
+  struct acell * iter = (typeof(iter))base; // [0]
   for (u64 i = 1; i < slab->objs_per_slab; i++) {
-    struct slab_object * const next = (typeof(next))(base + (i * slab->obj_size));
+    struct acell * const next = (typeof(next))(base + (i * slab->obj_size));
     iter->next = next;
     iter = next;
   }
   // base points to the first block; iter points to the last block
   if (safe) {
-    slab_push_safe(slab, (struct slab_object *)base, iter);
+    astk_push_safe(&slab->magic, (struct acell *)base, iter);
   } else { // unsafe
-    slab_push_unsafe(slab, (struct slab_object *)base, iter);
+    astk_push_unsafe(&slab->magic, (struct acell *)base, iter);
     slab->nready += slab->objs_per_slab;
   }
 }
@@ -2405,7 +2522,7 @@ slab_add_block(struct slab * const slab, struct slab_object * const blk, const b
 slab_expand(struct slab * const slab, const bool safe)
 {
   size_t blk_size;
-  struct slab_object * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
+  struct acell * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
   (void)blk_size;
   if (blk == NULL)
     return false;
@@ -2460,11 +2577,11 @@ slab_reserve_unsafe(struct slab * const slab, const u64 nr)
   void *
 slab_alloc_unsafe(struct slab * const slab)
 {
-  void * ret = slab_pop_unsafe(slab);
+  void * ret = astk_pop_unsafe(&slab->magic);
   if (ret == NULL) {
     if (!slab_expand(slab, false))
       return NULL;
-    ret = slab_pop_unsafe(slab);
+    ret = astk_pop_unsafe(&slab->magic);
   }
   debug_assert(ret);
   slab->nready--;
@@ -2475,13 +2592,13 @@ slab_alloc_unsafe(struct slab * const slab)
   void *
 slab_alloc_safe(struct slab * const slab)
 {
-  void * ret = slab_pop_safe(slab);
+  void * ret = astk_pop_safe(&slab->magic);
   if (ret)
     return ret;
 
   mutex_lock(&slab->lock);
   do {
-    ret = slab_pop_safe(slab); // may already have new objs
+    ret = astk_pop_safe(&slab->magic); // may already have new objs
     if (ret)
       break;
     if (!slab_expand(slab, true))
@@ -2495,7 +2612,7 @@ slab_alloc_safe(struct slab * const slab)
 slab_free_unsafe(struct slab * const slab, void * const ptr)
 {
   debug_assert(ptr);
-  slab_push_unsafe(slab, ptr, ptr);
+  astk_push_unsafe(&slab->magic, ptr, ptr);
   slab->nready++;
   slab->nalloc--;
 }
@@ -2503,20 +2620,20 @@ slab_free_unsafe(struct slab * const slab, void * const ptr)
   void
 slab_free_safe(struct slab * const slab, void * const ptr)
 {
-  slab_push_safe(slab, ptr, ptr);
+  astk_push_safe(&slab->magic, ptr, ptr);
 }
 
 // unsafe
   void
 slab_free_all(struct slab * const slab)
 {
-  struct slab_object * iter = slab->blk_head;
+  struct acell * iter = slab->blk_head;
   slab->magic = 0;
   slab->blk_head = NULL;
   slab->nalloc = 0;
   slab->nready = 0;
   while (iter) {
-    struct slab_object * const next = iter->next;
+    struct acell * const next = iter->next;
     slab_add_block(slab, iter, false);
     iter = next;
   }
@@ -2541,15 +2658,110 @@ slab_destroy(struct slab * const slab)
 {
   if (slab == NULL)
     return;
-  struct slab_object * iter = slab->blk_head;
+  struct acell * iter = slab->blk_head;
   while (iter) {
-    struct slab_object * const next = iter->next;
+    struct acell * const next = iter->next;
     pages_unmap(iter, slab->blk_size);
     iter = next;
   }
   free(slab);
 }
 // }}} slab
+
+// mpool {{{
+#define MPOOL_RANKS ((128lu))
+#define MPOOL_SHARDS ((8lu))
+#define MPOOL_SHARD_MASK ((MPOOL_SHARDS - 1lu))
+
+struct mpool {
+  au64 vec[MPOOL_RANKS][MPOOL_SHARDS][8]; // only use vec[x][y][0]
+};
+
+static __thread u64 mpool_seq = 0;
+
+  struct mpool *
+mpool_create(void)
+{
+  size_t memsz;
+  struct mpool * const ret = pages_alloc_best(sizeof(*ret), false, &memsz);
+  if (ret == NULL)
+    return NULL;
+
+  debug_assert(memsz == sizeof(*ret));
+  return ret;
+}
+
+  void
+mpool_destroy(struct mpool * const mp)
+{
+  for (u64 i = 0; i < MPOOL_RANKS; i++) {
+    for (u64 j = 0; j < MPOOL_SHARDS; j++) {
+      au64 * const pmagic = mp->vec[i][j];
+      for (void * ptr = astk_pop_unsafe(pmagic); ptr; ptr = astk_pop_unsafe(pmagic))
+        free(ptr);
+    }
+  }
+  pages_unmap(mp, sizeof(*mp));
+}
+
+  static size_t
+mpool_rank(const size_t sz)
+{
+  // 0 -> large number
+  // 1..8 -> 0
+  // 9..16 -> 1
+  // 1017..1024 -> 127
+  // 1025..1032 -> 128
+  return (sz - 1) >> 3;
+}
+
+  void *
+mpool_alloc(struct mpool * const mp, const size_t sz)
+{
+  const size_t rank = mpool_rank(sz);
+  if (rank < MPOOL_RANKS) {
+    void * const ret = astk_try_pop(mp->vec[rank][mpool_seq]);
+    if (ret) {
+      if (~(u64)ret) { // success
+        return ret;
+      } else { // contention
+        mpool_seq = (mpool_seq + 1) & MPOOL_SHARD_MASK;
+      }
+    }
+  }
+  return malloc(sz);
+}
+
+  static size_t
+mpool_usize(void * const ptr)
+{
+  const size_t sz = malloc_usable_size(ptr);
+#ifdef HEAPCHECKING
+  // valgrind and asan may return unaligned usable size
+  const size_t rsz = sz & (~7lu);
+#else // HEAPCHECKING
+  const size_t rsz = sz;
+#endif // HEAPCHECKING
+
+  debug_assert((rsz & 0x7lu) == 0);
+  return rsz;
+}
+
+  void
+mpool_free(struct mpool * const mp, void * const ptr)
+{
+  const size_t rsz = mpool_usize(ptr);
+  const size_t rank = mpool_rank(rsz);
+
+  if (rank < MPOOL_RANKS) {
+    if (astk_try_push(mp->vec[rank][mpool_seq], ptr, ptr))
+      return;
+    else
+      mpool_seq = (mpool_seq + 1) & MPOOL_SHARD_MASK;
+  }
+  free(ptr);
+}
+// }}} mpool
 
 // qsort {{{
   int
@@ -3363,12 +3575,19 @@ rgen_new_expo(const double percentile, const double range)
 rgen_new_linear(const u64 min, const u64 max, const s64 inc,
     const u8 type, rgen_next_func func)
 {
-  debug_assert(max > min);
+  if (min > max || inc == INT64_MIN)
+    return NULL;
+  const u64 mod = max - min + 1; // mod == 0 with min=0,max=UINT64_MAX
+  const u64 incu = (u64)((inc >= 0) ? inc : -inc);
+  // incu cannot be too large
+  if (mod && (incu >= mod))
+    return NULL;
+
   struct rgen * const gi = calloc(1, sizeof(*gi));
   gi->unit_u64 = max > UINT32_MAX;
   gi->linear.uc = 0;
   gi->linear.base = inc >= 0 ? min : max;
-  gi->linear.mod = max - min + 1;
+  gi->linear.mod = mod;
   gi->linear.inc = inc;
   gi->type = type;
   gi->min = min;
@@ -3382,7 +3601,7 @@ gen_linear_incs_helper(struct rgen * const gi)
 {
   u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), 1, MO_RELAXED);
   const u64 mod = gi->linear.mod;
-  if (v >= mod) {
+  if (mod && (v >= mod)) {
     do {
       v -= mod;
     } while (v >= mod);
@@ -3397,7 +3616,7 @@ gen_linear_incu_helper(struct rgen * const gi)
 {
   u64 v = gi->linear.uc++;
   const u64 mod = gi->linear.mod;
-  if (v == mod) {
+  if (mod && (v == mod)) {
     gi->linear.uc -= mod;
     v = 0;
   }
@@ -3430,18 +3649,21 @@ rgen_new_incu(const u64 min, const u64 max)
   return rgen_new_linear(min, max, 1, GEN_INCU, gen_incu);
 }
 
+// skips will produce wrong results when mod is not a power of two and ac overflows
   static u64
 gen_skips_up(struct rgen * const gi)
 {
-  const u64 v = atomic_fetch_add(&(gi->linear.ac), gi->linear.inc_u64);
-  return gi->linear.base + (v % gi->linear.mod);
+  const u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), gi->linear.inc_u64, MO_RELAXED);
+  const u64 mod = gi->linear.mod;
+  return gi->linear.base + (mod ? (v % mod) : v);
 }
 
   static u64
 gen_skips_down(struct rgen * const gi)
 {
-  const u64 v = atomic_fetch_sub(&(gi->linear.ac), gi->linear.inc_u64);
-  return gi->linear.base - (v % gi->linear.mod);
+  const u64 v = atomic_fetch_sub_explicit(&(gi->linear.ac), gi->linear.inc_u64, MO_RELAXED);
+  const u64 mod = gi->linear.mod;
+  return gi->linear.base - (mod ? (v % mod) : v);
 }
 
   struct rgen *
@@ -3455,16 +3677,22 @@ rgen_new_skips(const u64 min, const u64 max, const s64 inc)
   static u64
 gen_skipu_up(struct rgen * const gi)
 {
-  const u64 v = gi->linear.uc % gi->linear.mod;
-  gi->linear.uc += gi->linear.inc_u64;
+  const u64 v = gi->linear.uc;
+  const u64 mod = gi->linear.mod;
+  debug_assert((mod == 0) | (v < mod));
+  const u64 v1 = v + gi->linear.inc_u64;
+  gi->linear.uc = (v1 >= mod) ? (v1 - mod) : v1;
   return gi->linear.base + v;
 }
 
   static u64
 gen_skipu_down(struct rgen * const gi)
 {
-  const u64 v = gi->linear.uc % gi->linear.mod;
-  gi->linear.uc -= gi->linear.inc_u64;
+  const u64 v = gi->linear.uc;
+  const u64 mod = gi->linear.mod;
+  debug_assert((mod == 0) | (v < mod));
+  const u64 v1 = v - gi->linear.inc_u64; // actually +
+  gi->linear.uc = (v1 >= mod) ? (v1 - mod) : v1;
   return gi->linear.base - v;
 }
 
@@ -3559,7 +3787,7 @@ struct zeta_range_info {
 zeta_range_worker(void * const ptr)
 {
   struct zeta_range_info * const zi = (typeof(zi))ptr;
-  const u64 seq = atomic_fetch_add(&(zi->seq), 1);
+  const u64 seq = atomic_fetch_add_explicit(&(zi->seq), 1, MO_RELAXED);
   const u64 start = zi->start;
   const double theta = zi->theta;
   const u64 count = zi->count;
@@ -4445,7 +4673,7 @@ qsbr_wait(struct qsbr * const q, const u64 target)
       struct qshard * const shard = &(q->shards[i]);
       const u64 bits1 = atomic_load_explicit(&(shard->bitmap), MO_CONSUME);
       for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
-        const u64 bit = bits & -bits;
+        const u64 bit = bits & -bits; // extract lowest bit
         if (((bits1 & bit) == 0) ||
             (atomic_load_explicit(&(shard->ptrs[__builtin_ctzl(bit)]->qstate), MO_CONSUME) == target))
           bms[i] &= ~bit;
