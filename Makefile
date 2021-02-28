@@ -35,7 +35,11 @@ FLG += -DFORKER_PAPI
 endif
 
 bin : libwh.so
-libwh.so : lib.c lib.h kv.c kv.h wh.c wh.h
-	$(CCC) $(FLG) -shared -fPIC -o $@ lib.c kv.c wh.c
+libwh.so : Makefile Makefile.common lib.c lib.h kv.c kv.h wh.c wh.h
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) -shared -fPIC)
+	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
+	$(CCC) $(ALLFLG) -o $@ lib.c kv.c wh.c $(ALLLIB)
+	strip --strip-all --discard-all @wh.strip $@
+
 
 include Makefile.common
