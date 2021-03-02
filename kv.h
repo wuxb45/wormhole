@@ -438,19 +438,6 @@ kvmap_api_helper(int argc, char ** const argv,
 // }}} kvmap_api
 
 // helpers {{{
-struct entry13 {
-  union {
-    u16 e1; // TODO: position of e1 is undefined
-    struct {
-      u64 e1_64:16;
-      u64 e3:48;
-    };
-    u64 v64;
-  };
-};
-
-static_assert(sizeof(struct entry13) == 8, "sizeof(entry13) != 8");
-
   extern void
 kvmap_inp_steal_kv(struct kv * const kv, void * const priv);
 
