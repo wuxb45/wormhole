@@ -11,16 +11,23 @@ The code has been tested with Intel Haswell, Broadwell, and Skylake CPUs.
 It has also been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a Jetson Nano running 64-bit Ubuntu Groovy.
 
 ## NEWS
+
 * `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples.
+
 * The `whsafe` API is a *worry-free* thread-safe wormhole API.
 At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
+
 * `merge` (Merge a new kv with existing kv) and `delr` (delete range) operations have been added. They are all thread-safe.
 
 ## Highlights:
+
 * Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe.
 See `stresstest.c` for more thread-safe operations.
+
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
+
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
+
 * No background threads or global status. Wormhole uses a mix of user-space rwlocks and QSBR RCU to synchronize between readers and writers.
 See below for more details.
 
@@ -328,22 +335,27 @@ Wormhole uses hugepages when available. To reserve some hugepages in Linux (1000
 # Tuning
 A few macros in `wh.c` can be tuned.
 * `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation.
-The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize those 1GB hugepages.
+The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize 1GB hugepages.
+Using 1GB hugepages can slightly improve search performance.
+
 * `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128.
-Setting it to 256 can increase search speed by roughly 10% but slows down internal split/merge operations (but not every insertion/deletion).
-* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of references) of the QSBR RCU.
-The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 22, 38, and 54, and `QSBR_SHARDS_NR` must be 2^n.
-The defaults are set to 38 and 8, respectively.
-This QSBR implementation uses sharding so `wormhole_ref()` will block (busy-waiting) if the target shard is full.
+Compared to the default, `WH_KPN=256` can offer 5% to 10%+ higher search/update speed.
+However, random insertions can be slower due to more expensive sorting in each node.
+
+* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of active references) of the QSBR RCU.
+The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 23, 39, and 55, and `QSBR_SHARDS_NR` must be 2^n, n<=6.
+The defaults are 23 and 32, respectively. The QSBR registry can run out of space if there are a few hundred of threads, which is not a problem in practice.
 
 # Limitations
 
 ## Key Patterns
 The Wormhole index works well with real-world keys.
 A **split** operation may fail with one of the following (almost impossible) conditions:
+
 * The maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit).
 Split will fail if all cut-points in the target leaf node require longer anchor-keys.
 In such case, at least **129** (`WH_KPN + 1`) keys must share a common prefix of 65535+ bytes.
+
 * Two anchor-keys cannot be identical after removing their trailing zeros.
 To be specific, `"W"` and `"Worm"` can be anchor-keys at the same time, but `"W"` and `"W\0\0"` cannot (while these two keys can co-exist as regular keys).
 If there are at least **129** (`WH_KPN + 1`) keys shareing the same prefix but having ONLY different numbers of trail zeros (having `"W"`, `"W\0"`, `"W\0\0"`,

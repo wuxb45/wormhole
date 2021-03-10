@@ -358,6 +358,8 @@ struct kvmap_api {
   bool        (* merge)   (void * const ref, const struct kref * const key, kv_merge_func uf, void * const priv);
   // delete-range: delete all keys from start (inclusive) to end (exclusive)
   u64         (* delr)    (void * const ref, const struct kref * const start, const struct kref * const end);
+  // make everything persist; for persistent maps only
+  void        (* sync)    (void * const ref);
 
   // for thread-safe iter: it is assumed the key under the current cursor is freezed/immutable
   // create iterator from a ref; must call iter_seek to make it valid

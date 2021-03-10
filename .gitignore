@@ -1,4 +1,5 @@
 *.out
+*.o
 *.so
 *.a
 tags
