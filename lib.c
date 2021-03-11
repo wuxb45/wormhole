@@ -1172,6 +1172,8 @@ mutex_deinit(mutex * const lock)
 // rwdep {{{
 // poor man's lockdep for rwlock
 // per-thread lock list
+// it calls debug_die() when local double-(un)locking is detected
+// cyclic dependencies can be manually identified by looking at the two lists below in gdb
 #ifdef RWDEP
 #define RWDEP_NR ((16))
 __thread const rwlock * rwdep_readers[RWDEP_NR] = {};
@@ -1279,7 +1281,7 @@ rwlock_trylock_read(rwlock * const lock)
     rwdep_lock_read(lock);
     return true;
   } else {
-    atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
+    atomic_fetch_sub_explicit(pvar, 1, MO_RELAXED);
     return false;
   }
 }
@@ -1314,7 +1316,7 @@ rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
     }
   } while (nr--);
 
-  atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
+  atomic_fetch_sub_explicit(pvar, 1, MO_RELAXED);
   return false;
 }
 
@@ -2860,7 +2862,12 @@ compare_u16(const void * const p1, const void * const p2)
 {
   const u16 v1 = *((const u16 *)p1);
   const u16 v2 = *((const u16 *)p2);
-  return (int)((s16)(v1 - v2));
+  if (v1 < v2)
+    return -1;
+  else if (v1 > v2)
+    return 1;
+  else
+    return 0;
 }
 
   inline void
@@ -2892,7 +2899,12 @@ compare_u32(const void * const p1, const void * const p2)
 {
   const u32 v1 = *((const u32 *)p1);
   const u32 v2 = *((const u32 *)p2);
-  return (int)(v1 - v2);
+  if (v1 < v2)
+    return -1;
+  else if (v1 > v2)
+    return 1;
+  else
+    return 0;
 }
 
   inline void
@@ -2924,9 +2936,13 @@ compare_u64(const void * const p1, const void * const p2)
 {
   const u64 v1 = *((const u64 *)p1);
   const u64 v2 = *((const u64 *)p2);
-  const u64 diff = v1 - v2;
-  const int ret = ((int)(diff >> 32)) | __builtin_popcountl(diff);
-  return ret;
+
+  if (v1 < v2)
+    return -1;
+  else if (v1 > v2)
+    return 1;
+  else
+    return 0;
 }
 
   inline void
