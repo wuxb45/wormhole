@@ -513,7 +513,7 @@ m_usable_size(void * const ptr);
 fdsize(const int fd);
 
   extern u32
-memlcp(const u8 * p1, const u8 * p2, const u32 max);
+memlcp(const u8 * const p1, const u8 * const p2, const u32 max);
 
 __attribute__ ((format (printf, 2, 3)))
   extern void
@@ -857,6 +857,7 @@ struct rgen;
 
 typedef u64 (*rgen_next_func)(struct rgen * const);
 
+extern struct rgen * rgen_new_random64(const u64 seed);
 extern struct rgen * rgen_new_const(const u64 c);
 extern struct rgen * rgen_new_expo(const double percentile, const double range);
 extern struct rgen * rgen_new_incs(const u64 min, const u64 max);

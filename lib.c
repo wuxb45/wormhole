@@ -233,33 +233,23 @@ crc32c_inc_123(const u8 * buf, u32 nr, u32 crc)
   inline u32
 crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
 {
-  debug_assert((nr & 3) == 0);
+  //debug_assert((nr & 3) == 0);
+  const u32 nr8 = nr >> 3;
 #pragma nounroll
-  while (nr >= sizeof(u64)) {
-    crc = crc32c_u64(crc, *((u64*)buf));
-    nr -= (u32)sizeof(u64);
-    buf += sizeof(u64);
-  }
-  if (nr)
-    crc = crc32c_u32(crc, *((u32*)buf));
+  for (u32 i = 0; i < nr8; i++)
+    crc = crc32c_u64(crc, ((u64*)buf)[i]);
+
+  if (nr & 4u)
+    crc = crc32c_u32(crc, ((u32*)buf)[nr8<<1]);
   return crc;
 }
 
   u32
 crc32c_inc(const u8 * buf, u32 nr, u32 crc)
 {
-#pragma nounroll
-  while (nr >= sizeof(u64)) {
-    crc = crc32c_u64(crc, *((u64*)buf));
-    nr -= (u32)sizeof(u64);
-    buf += sizeof(u64);
-  }
-  if (nr >= sizeof(u32)) {
-    crc = crc32c_u32(crc, *((u32*)buf));
-    nr -= (u32)sizeof(u32);
-    buf += sizeof(u32);
-  }
-  return nr ? crc32c_inc_123(buf, nr, crc) : crc;
+  crc = crc32c_inc_x4(buf, nr, crc);
+  const u32 nr123 = nr & 3u;
+  return nr123 ? crc32c_inc_123(buf + nr - nr123, nr123, crc) : crc;
 }
 // }}} crc32c
 
@@ -2142,37 +2132,32 @@ fdsize(const int fd)
 }
 
   u32
-memlcp(const u8 * p1, const u8 * p2, const u32 max)
+memlcp(const u8 * const p1, const u8 * const p2, const u32 max)
 {
-  const u32 max64 = max >> 3 << 3;
+  const u32 max64 = max & (~7u);
   u32 clen = 0;
   while (clen < max64) {
-    const u64 v1 = *(const u64 *)p1;
-    const u64 v2 = *(const u64 *)p2;
-    if (v1 != v2)
-      return clen + (u32)(__builtin_ctzl(v1 ^ v2) >> 3);
+    const u64 v1 = *(const u64 *)(p1+clen);
+    const u64 v2 = *(const u64 *)(p2+clen);
+    const u64 x = v1 ^ v2;
+    if (x)
+      return clen + (u32)(__builtin_ctzl(x) >> 3);
 
     clen += sizeof(u64);
-    p1 += sizeof(u64);
-    p2 += sizeof(u64);
   }
 
   if ((clen + sizeof(u32)) <= max) {
-    const u32 v1 = *(const u32 *)p1;
-    const u32 v2 = *(const u32 *)p2;
-    if (v1 != v2)
-      return clen + (u32)(__builtin_ctz(v1 ^ v2) >> 3);
+    const u32 v1 = *(const u32 *)(p1+clen);
+    const u32 v2 = *(const u32 *)(p2+clen);
+    const u32 x = v1 ^ v2;
+    if (x)
+      return clen + (u32)(__builtin_ctz(x) >> 3);
 
     clen += sizeof(u32);
-    p1 += sizeof(u32);
-    p2 += sizeof(u32);
   }
 
-  while ((clen < max) && (*p1 == *p2)) {
+  while ((clen < max) && (p1[clen] == p2[clen]))
     clen++;
-    p1++;
-    p2++;
-  }
   return clen;
 }
 
@@ -3502,22 +3487,81 @@ vctr_destroy(struct vctr * const v)
 
 // rgen {{{
 
+// random {{{
+// Lehmer's generator is 2x faster than xorshift
+/**
+ * D. H. Lehmer, Mathematical methods in large-scale computing units.
+ * Proceedings of a Second Symposium on Large Scale Digital Calculating
+ * Machinery;
+ * Annals of the Computation Laboratory, Harvard Univ. 26 (1951), pp. 141-146.
+ *
+ * P L'Ecuyer,  Tables of linear congruential generators of different sizes and
+ * good lattice structure. Mathematics of Computation of the American
+ * Mathematical
+ * Society 68.225 (1999): 249-260.
+ */
+struct lehmer_u64 {
+  union {
+    u128 v128;
+    u64 v64[2];
+  };
+};
+
+static __thread struct lehmer_u64 rseed_u128 = {.v64 = {4294967291, 1549556881}};
+
+  static inline u64
+lehmer_u64_next(struct lehmer_u64 * const s)
+{
+  const u64 r = s->v64[1];
+  s->v128 *= 0xda942042e4dd58b5lu;
+  return r;
+}
+
+  static inline void
+lehmer_u64_seed(struct lehmer_u64 * const s, const u64 seed)
+{
+  s->v128 = (((u128)(~seed)) << 64) | (seed | 1);
+  (void)lehmer_u64_next(s);
+}
+
+  inline u64
+random_u64(void)
+{
+  return lehmer_u64_next(&rseed_u128);
+}
+
+  inline void
+srandom_u64(const u64 seed)
+{
+  lehmer_u64_seed(&rseed_u128, seed);
+}
+
+  inline double
+random_double(void)
+{
+  // random between [0.0 - 1.0]
+  const u64 r = random_u64();
+  return ((double)r) * (1.0 / ((double)(~0lu)));
+}
+// }}} random
+
 // struct {{{
 #define GEN_CONST    ((1))
-#define GEN_INCS     ((2))
-#define GEN_INCU     ((3))      // +1
-#define GEN_SKIPS    ((4))
-#define GEN_SKIPU    ((5))      // +n
-#define GEN_DECS     ((6))
-#define GEN_DECU     ((7))      // -1
-#define GEN_EXPO     ((8))      // exponential
-#define GEN_ZIPF     ((9))      // Zipfian, 0 is the most popular.
-#define GEN_XZIPF   ((10))      // ScrambledZipfian. scatters the "popular" items across the itemspace.
-#define GEN_UNIZIPF ((11))      // Uniform + Zipfian (multiple hills)
-#define GEN_ZIPFUNI ((12))      // Zipfian + Uniform (one hill)
-#define GEN_UNIFORM ((13))      // Uniformly distributed in an interval [a,b]
-#define GEN_TRACE32 ((14))      // Read from a trace file with unit of u32.
-#define GEN_LATEST  ((15))      // latest (moving head - zipfian)
+#define GEN_RANDOM64 ((2))
+#define GEN_INCS     ((3))
+#define GEN_INCU     ((4))      // +1
+#define GEN_SKIPS    ((5))
+#define GEN_SKIPU    ((6))      // +n
+#define GEN_DECS     ((7))
+#define GEN_DECU     ((8))      // -1
+#define GEN_EXPO     ((9))      // exponential
+#define GEN_ZIPF    ((10))      // Zipfian, 0 is the most popular.
+#define GEN_XZIPF   ((11))      // ScrambledZipfian. scatters the "popular" items across the itemspace.
+#define GEN_UNIZIPF ((12))      // Uniform + Zipfian (multiple hills)
+#define GEN_ZIPFUNI ((13))      // Zipfian + Uniform (one hill)
+#define GEN_UNIFORM ((14))      // Uniformly distributed in an interval [a,b]
+#define GEN_TRACE32 ((15))      // Read from a trace file with unit of u32.
+#define GEN_LATEST  ((16))      // latest (moving head - zipfian)
 #define GEN_ASYNC  ((255))      // async gen
 
 struct rgen_linear { // 8x4
@@ -3590,6 +3634,7 @@ typedef u64 (*rgen_next_func)(struct rgen * const);
 
 struct rgen {
   union {
+    struct lehmer_u64        random64;
     struct rgen_linear       linear;
     struct rgen_expo         expo;
     struct rgen_trace32      trace32;
@@ -3620,48 +3665,6 @@ rgen_set_next(struct rgen * const gen, rgen_next_func next)
 }
 // }}} struct
 
-// random {{{
-// Lehmer's generator is 2x faster than xorshift
-/**
- * D. H. Lehmer, Mathematical methods in large-scale computing units.
- * Proceedings of a Second Symposium on Large Scale Digital Calculating
- * Machinery;
- * Annals of the Computation Laboratory, Harvard Univ. 26 (1951), pp. 141-146.
- *
- * P L'Ecuyer,  Tables of linear congruential generators of different sizes and
- * good lattice structure. Mathematics of Computation of the American
- * Mathematical
- * Society 68.225 (1999): 249-260.
- */
-static __thread union {
-  u128 v128;
-  u64 v64[2];
-} rseed_u128 = {.v64 = {4294967291, 1549556881}};
-
-  inline u64
-random_u64(void)
-{
-  const u64 r = rseed_u128.v64[1];
-  rseed_u128.v128 *= 0xda942042e4dd58b5lu;
-  return r;
-}
-
-  inline void
-srandom_u64(const u64 seed)
-{
-  rseed_u128.v128 = (((u128)(~seed)) << 64) | (seed | 1);
-  (void)random_u64();
-}
-
-  inline double
-random_double(void)
-{
-  // random between [0.0 - 1.0]
-  const u64 r = random_u64();
-  return ((double)r) * (1.0 / ((double)(~0lu)));
-}
-// }}} random
-
 // genenators {{{
 
 // simple ones {{{
@@ -3681,6 +3684,25 @@ rgen_new_const(const u64 c)
   gi->min = gi->max = c;
   rgen_set_next(gi, gen_constant);
   gi->shared = true;
+  return gi;
+}
+
+  static u64
+gen_random64(struct rgen * const gi)
+{
+  return lehmer_u64_next(&gi->random64);
+}
+
+  struct rgen *
+rgen_new_random64(const u64 seed)
+{
+  struct rgen * const gi = calloc(1, sizeof(*gi));
+  gi->unit_u64 = 1;
+  gi->type = GEN_RANDOM64;
+  gi->min = 0;
+  gi->max = UINT64_MAX;
+  lehmer_u64_seed(&gi->random64, seed);
+  rgen_set_next(gi, gen_random64);
   return gi;
 }
 
@@ -4224,6 +4246,7 @@ rgen_helper_message(void)
 {
   fprintf(stderr, "%s Usage: rgen <type> ...\n", __func__);
   fprintf(stderr, "%s example: rgen const <value>\n", __func__);
+  fprintf(stderr, "%s example: rgen random64 <seed>\n", __func__);
   fprintf(stderr, "%s example: rgen expo <perc> <range>\n", __func__);
   fprintf(stderr, "%s example: rgen uniform <min> <max>\n", __func__);
   fprintf(stderr, "%s example: rgen zipfian <min> <max>\n", __func__);
@@ -4248,6 +4271,9 @@ rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
 
   if ((0 == strcmp(argv[1], "const")) && (argc >= 3)) {
     *gen_out = rgen_new_const(a2u64(argv[2]));
+    return 3;
+  } else if ((0 == strcmp(argv[1], "random64")) && (argc >= 3)) {
+    *gen_out = rgen_new_random64(a2u64(argv[2]));
     return 3;
   } else if ((0 == strcmp(argv[1], "expo")) && (argc >= 4)) {
     *gen_out = rgen_new_expo(atof(argv[2]), atof(argv[3]));
