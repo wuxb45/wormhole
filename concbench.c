@@ -70,7 +70,6 @@ kv_probe_worker(struct wormhole * const wh)
   return NULL;
 }
 
-
   int
 main(int argc, char ** argv)
 {

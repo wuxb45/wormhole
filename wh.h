@@ -213,42 +213,6 @@ whunsafe_iter_destroy(struct wormhole_iter * const iter);
   extern void
 wormhole_fprint(struct wormhole * const map, FILE * const out);
 
-// verify & debugging
-#ifdef WORMHOLE_DEBUG
-  void
-wormhole_fprint_verbose(struct wormhole * const map, FILE * const out);
-
-  extern bool
-wormhole_verify(struct wormhole * const map);
-
-  extern void
-wormhole_dump_memory(struct wormhole * const map, const char * const filename, const char * const opt);
-
-  extern bool
-wormhole_merge_at(struct wormref * const ref, const struct kref * const key);
-
-  extern bool
-wormhole_split_at(struct wormref * const ref, const struct kref * const key);
-
-  extern void
-wormhole_sync_at(struct wormref * const ref, const struct kref * const key);
-
-  extern void
-wormhole_print_meta_anchors(struct wormhole * const map);
-
-  extern void
-wormhole_print_leaf_anchors(struct wormhole * const map, const bool use_hex);
-
-  extern void
-wormhole_print_meta_lrmost(struct wormhole * const map);
-
-  extern void
-wormhole_print_leaf_keys(struct wormhole * const map, const bool use_hex);
-
-  extern void *
-wormhole_jump_leaf_only(struct wormhole * const map, const struct kref * const key);
-#endif // WORMHOLE_DEBUG
-
 extern const struct kvmap_api kvmap_api_wormhole;
 extern const struct kvmap_api kvmap_api_whsafe;
 extern const struct kvmap_api kvmap_api_whunsafe;
