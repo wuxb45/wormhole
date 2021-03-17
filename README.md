@@ -12,6 +12,9 @@ It has also been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a J
 
 ## NEWS
 
+* The limitation about anchor keys with trailing (binary) zeroes has been removed in the recent updates (See Section 3.3 in the original paper for details of the limitation).
+Now Wormhole can manage binary string keys of any patterns. The maximum key length is UINT32_MAX and the maximum anchor key length is UINT16_MAX.
+
 * `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples.
 
 * The `whsafe` API is a *worry-free* thread-safe wormhole API.
