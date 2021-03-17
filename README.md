@@ -245,44 +245,53 @@ An ref-holder, if not actively performing index operations, may block a writer t
 (because of not periodically announcing its quiescent state).
 If a ref-holder is about to become inactive from Wormhole's perspective (doing something else or just sleeping),
 it is recommended that the holder temporarily releases the `ref` before entering the inactive status (such as calling `sleep(10)`),
-and obtains a new `ref` before performing the next index operation.
+and reactivate the `ref` before performing the next index operation.
 
 ```C
 {
-    // holding a ref
-    wormhole_unref(ref);  // warning: this can slowdown your program
+    // assume we already have an active ref
+    wormhole_park(ref);   // this will avoid blocking any other threads
     sleep(10);
-    ref = wormhole_ref(map);  // warning: this can slowdown your program
-    // perform index operations with (the new) ref
-}
-```
-
-However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
-A better solution can be used if the ref-holder thread can periodically update its quiescent state by calling `wormhole_refresh_qstate()`.
-This method has negligible cost (only two instructions).
-For example:
-
-```C
-{
-    // holding a ref
-    while (wait_for_client_with_timeout_10us(...)) {
-      wormhole_refresh_qstate(ref);  // only two mov instructions on x86_64
-    }
-    // perform index operations with ref
+    wormhole_resume(ref);  // this will reactivate the ref
+    // continue to perform index operations
 }
 ```
 
 A common scenario of dead-locking is when acquiring locks while holding a wormhole reference,
-since `lock()` functions will block-wait and the calling thread won't be able to update the quiescent state.
-It is recommanded to always use `trylock()` in a loop and keep updating the qstate:
+The following example could cause deadlock between two threads.
 
 ```C
+// Thread A has an active ref and try to lock()
 {
-    while (pthread_mutex_trylock(&some_lock) == EBUSY) {
+    struct wormref * ref = wormhole_ref(wh);
+    lock(just_a_lock); // << block here
+}
+
+// Thread B already acquired the lock and wants to insert a key to wh
+{
+    lock(just_a_lock);
+    wormhole_set(ref, kv); << block here
+}
+```
+
+To avoid this scenario, thread A should call `wormhole_park(ref)` before acquiring the lock, or use a loop to keep updating the qstate of the ref:
+```C
+// Solution A.1: use wormhole_park()
+{
+    struct wormref * ref = wormhole_ref(wh);
+    wormhole_park(ref);
+    lock(just_a_lock);
+}
+
+// Solution A.2: use try_lock and wormhole_refresh_qstate()
+{
+    struct wormref * ref = wormhole_ref(wh);
+    while (!try_lock(just_a_lock)) {
         wormhole_refresh_qstate(ref);
     }
 }
 ```
+
 
 The above issues with QSBR are all gone with `whsafe`.
 
