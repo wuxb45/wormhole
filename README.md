@@ -66,31 +66,65 @@ It generates six-word keys based on a word list (words.txt). See `sprintf` in `c
 
 `libwh.so` can be linked to any C/C++ program with the help of `wh.h`.
 
-# The code
+# The wh API (USE THIS)
 
-You may not need to read the following details if the simple and thread-safe interface used by `easydemo.c` can meet your requirements.
+The `wh_*` functions provides a clean programming interface that helps to avoid common inefficient use of the Wormhole data structure.
+If you're not sure which interface to use, just use `wh_*`. Read `easydemo.c` for more details.
+
+Coding examples:
+
+    struct wormhole * wh = wh_create(); // create a new wormhole instance
+    struct wormref * ref = wh_ref(wh); // to access wh, a thread must obtain a reference
+    wh_set(ref, "hello", 5, "world!", 6); // insert a kv pair
+    wh_set(ref, NULL, 0, NULL, 0); // both key and value can be zero-sized
+    r = wh_probe(ref, "hello", 5); // r == true
+    r = wh_probe(ref, NULL, 0); // r == true
+    r = wh_probe(ref, "abc", 3); // r == false
+    u8 buf [6];
+    u32 len_out;
+    r = wh_get(ref, "hello", 5, buf, &len_out); // r == true, len_out == 6, "world!" in buf (without trailing zero)
+    struct wormhole_iter * iter = wh_iter_create(ref); // creates an iter on a ref
+    wh_iter_seek(iter, "h", 1); // seek for the smallest key >= "h"; the iter will be placed on "hello"
+    r = wh_iter_valid(iter); // r == true; You should always check if iter is valid after a seek() and skip()
+    r = wh_iter_peek(iter, buf, &len_out, NULL, NULL); // only need the key: will get "hello" and 5
+    r = wh_iter_peek(iter, NULL, NULL, buf, &len_out); // only need the value: will get "world!" and 6
+    // (or you can get both in one call with all ptrs provided)
+    wh_iter_skip(iter, 1); // skip the current key
+    r = wh_iter_valid(iter); // r == false; already passed the end of the dataset
+    wh_iter_park(iter); // an iter may hold some locks internally; It's a good driving manner to "park" the iter before sleep. Don't block the highway!
+    sleep(10); // or doing anything else without interacting with the wormhole instance.
+    wh_iter_seek(iter, NULL, 0); // to start the engine, just do another seek()
+    r = wh_iter_valid(iter); // r == true; on the zero-sized key now
+    wh_iter_destroy(iter); // now we're done with the iter
+    wh_del(ref, "hello", 5); // delete a key
+    wh_del(ref, NULL, NULL); // delete the zero-sized key
+    wh_unref(ref); // the current thread is no longer interested in accessing the index
+    wh_destroy(wh); // fully destroy the index; all references should have been released before calling this
+
+# Advanced APIs
+
+If the simple and thread-safe `wh_*` interface already meets your performance requirements, You don't need to read the following sections.
+Using the `wormhole_*` and `whunsafe_*` APIs can maximize the efficiency of your code with a roughly 5%-10% speedup.
+However, inefficient use of these APIs, such as repeatedly calling malloc() to prepare the key buffer, can easily hurt the performance.
 
 ## `struct kv` and `struct kref`
 
-Please refer to demo1.c for quick examples of how to manipulate the *key-value* (`struct kv`)
-and the *key-reference* (`struct kref`).
 There are a handful of helper functions (`kv_*` and `kref_*` functions) at the beginning of wh.h.
-
 It's worth noting that the *key's hash* (`hash` of `struct kv` and `hash32` of `struct kref`)
 must be up-to-date before passed to wormhole.
 The `kv_refill*` helper functions internally update the hash after filling the kv contents.
 In a more general case, `kv_update_hash` directly updates a `struct kv`'s hash.
 Similarly, `kref_refill_hash32()` calculates the 32-bit hash for `struct kref`.
+Performing the hash calculation at the client side can achieve the best efficiency on the server (the index operations).
 
 ## The Wormhole API
 
-The Wormhole functions are listed near the bottom of wh.h (see the `wormhole_*` functions).
-`demo1.c` and `concbench.c` are examples of how to use a Wormhole index.
+`concbench.c` and `stresstest.c` are examples of how to use a Wormhole index.
 There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
 * `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimal complexity in your code, you should use `whsafe`.
-* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for deadlock prevention.
+* `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for blocking prevention.
 * `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform internal concurrency control.
-External synchronization should be employed when running whunsafe in a concurrent environment.
+External synchronization should be employed when accessing `whunsafe` in a concurrent environment.
 
 The functions of each API can be found near the end of `wh.c` (search `kvmap_api_whsafe`, `kvmap_api_wormhole`, and `kvmap_api_whunsafe`).
 Note that each API contains a mix of `whsafe_*`, `wormhole_*`, and `whunsafe_*` functions.
@@ -334,15 +368,16 @@ Wormhole uses hugepages when available. To reserve some hugepages in Linux (1000
 
     # echo 10000 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 
-
 # Tuning
+
 A few macros in `wh.c` can be tuned.
+
 * `WH_SLABLEAF_SIZE` controls the slab size for leaf node allocation.
 The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_SLABLEAF_SIZE` can be set to `((1lu << 30))` to utilize 1GB hugepages.
-Using 1GB hugepages can slightly improve search performance.
+Using 1GB hugepages can improve search performance on a large dataset.
 
 * `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128.
-Compared to the default, `WH_KPN=256` can offer 5% to 10%+ higher search/update speed.
+Compared to the default, `WH_KPN=256` can offer 5-10%+ higher search/update speed.
 However, random insertions can be slower due to more expensive sorting in each node.
 
 * `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of active references) of the QSBR RCU.
@@ -353,7 +388,7 @@ The defaults are 23 and 32, respectively. The QSBR registry can run out of space
 
 ## Key Patterns
 A **split** operation will fail when **129** (`WH_KPN + 1`) keys share a common prefix of 65535+ bytes.
-In Wormhole, the maximum _anchor-key_ length is 65535 bytes (represented by a 16-bit value), which is shorter than the maximum key-length (32-bit).
+In Wormhole, the maximum _anchor-key_ length is 65535 (2^16) bytes, which is shorter than the maximum key-length (2^32).
 
 ## Memory Allocation
 Insertions/updates can fail and return false when a memory allocation fails.
