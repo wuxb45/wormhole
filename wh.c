@@ -1246,7 +1246,6 @@ wormhole_meta_lcp(const struct wormhmap * const hmap, struct kref * const kref, 
         gd--;
         ret = NULL;
       } else {
-        gd = 1;
         break;
       }
     } else {
