@@ -294,8 +294,7 @@ To avoid this scenario, thread A should either call `wormhole_park(ref)` before 
 }
 ```
 
-
-The above issues with QSBR are all gone with `whsafe`.
+The above issues with QSBR are specific to the `wormhole` API. `whsafe` does not have these issues.
 
 ### The `whunsafe` API
 A set of *thread-unsafe* functions are also provided. See the functions with _prefix_ `whunsafe`.
