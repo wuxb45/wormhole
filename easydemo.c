@@ -35,7 +35,7 @@ main(int argc, char ** argv)
   char kbuf_out[8] = {};
   u32 vlen_out = 0;
   char vbuf_out[8] = {};
-  r = wh_get(ref, "wormhole", 8, vbuf_out, &vlen_out);
+  r = wh_get(ref, "wormhole", 8, vbuf_out, 8, &vlen_out);
   printf("wh_get wormhole %c %u %.*s\n", r?'T':'F', vlen_out, vlen_out, vbuf_out);
 
   // in a concurrent environment, the kvmap_api_wormhole need park&resume when a thread is about to go idle

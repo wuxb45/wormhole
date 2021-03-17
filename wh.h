@@ -252,7 +252,7 @@ wh_probe(struct wormref * const ref, const void * const kbuf, const u32 klen);
 
   extern bool
 wh_get(struct wormref * const ref, const void * const kbuf, const u32 klen,
-    void * const vbuf_out, u32 * const vlen_out);
+    void * const vbuf_out, const u32 vbuf_size, u32 * const vlen_out);
 
   extern bool
 wh_inpr(struct wormref * const ref, const void * const kbuf, const u32 klen,

@@ -3301,6 +3301,8 @@ wh_set(struct wormref * const ref, const void * const kbuf, const u32 klen,
     const void * const vbuf, const u32 vlen)
 {
   struct kv * const newkv = kv_create(kbuf, klen, vbuf, vlen);
+  if (newkv == NULL)
+    return false;
   // must use with kvmap_mm_ndf (see below)
   // the newkv will be saved in the Wormhole and freed by Wormhole when upon deletion
   return wh_api->set(ref, newkv);
@@ -3325,7 +3327,7 @@ wh_probe(struct wormref * const ref, const void * const kbuf, const u32 klen)
 }
 
 // for wh_get()
-struct wh_inp_info { void * vbuf_out; u32 * vlen_out; };
+struct wh_inp_info { void * vbuf_out; u32 * vlen_out; u32 vbuf_size; };
 
 // a kv_inp_func; use this to retrieve the KV's data without unnecesary memory copying
   static void
@@ -3334,7 +3336,8 @@ wh_inp_copy_value(struct kv * const curr, void * const priv)
   if (curr) { // found
     struct wh_inp_info * const info = (typeof(info))priv;
     // copy the value data out
-    memcpy(info->vbuf_out, kv_vptr_c(curr), curr->vlen);
+    const u32 copy_size = info->vbuf_size < curr->klen ? info->vbuf_size : curr->klen;
+    memcpy(info->vbuf_out, kv_vptr_c(curr), copy_size);
     // copy the vlen out
     *info->vlen_out = curr->vlen;
   }
@@ -3345,11 +3348,11 @@ wh_inp_copy_value(struct kv * const curr, void * const priv)
 // We assume vbuf_out is large enough to hold the output value
   bool
 wh_get(struct wormref * const ref, const void * const kbuf, const u32 klen,
-    void * const vbuf_out, u32 * const vlen_out)
+    void * const vbuf_out, const u32 vbuf_size, u32 * const vlen_out)
 {
   struct kref kref;
   kref_ref_hash32(&kref, kbuf, klen);
-  struct wh_inp_info info = {vbuf_out, vlen_out};
+  struct wh_inp_info info = {vbuf_out, vlen_out, vbuf_size};
   // use the inplace read function to get the value if it exists
   return wh_api->inpr(ref, &kref, wh_inp_copy_value, &info);
 }
