@@ -27,7 +27,7 @@ At a small cost on each operation, users no longer need to call the `wormhole_re
 * Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe.
 See `stresstest.c` for more thread-safe operations.
 
-* Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified in `struct kv`.
+* Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified.
 
 * Long keys are welcome! The key-length field (`klen` in `struct kv`) is a 32-bit unsigned integer and the maximum size of a key is 4294967295.
 
@@ -73,6 +73,7 @@ If you're not sure which interface to use, just use `wh_*`. Read `easydemo.c` fo
 
 Coding examples:
 
+```C
     struct wormhole * wh = wh_create(); // create a new wormhole instance
     struct wormref * ref = wh_ref(wh); // to access wh, a thread must obtain a reference
     wh_set(ref, "hello", 5, "world!", 6); // insert a kv pair
@@ -91,15 +92,16 @@ Coding examples:
     // (or you can get both in one call with all ptrs provided)
     wh_iter_skip(iter, 1); // skip the current key
     r = wh_iter_valid(iter); // r == false; already passed the end of the dataset
-    wh_iter_park(iter); // an iter may hold some locks internally; It's a good driving manner to "park" the iter before sleep. Don't block the highway!
-    sleep(10); // or doing anything else without interacting with the wormhole instance.
-    wh_iter_seek(iter, NULL, 0); // to start the engine, just do another seek()
+    wh_iter_park(iter); // an iter may hold locks; It's a good manner to "park" the iter before sleep. Don't block the intersection!
+    sleep(10); // not interacting with the wormhole instance.
+    wh_iter_seek(iter, NULL, 0); // need to do another seek to reactivate the iter
     r = wh_iter_valid(iter); // r == true; on the zero-sized key now
     wh_iter_destroy(iter); // now we're done with the iter
     wh_del(ref, "hello", 5); // delete a key
     wh_del(ref, NULL, NULL); // delete the zero-sized key
     wh_unref(ref); // the current thread is no longer interested in accessing the index
     wh_destroy(wh); // fully destroy the index; all references should have been released before calling this
+```
 
 # Advanced APIs
 
@@ -137,6 +139,7 @@ A thread needs to hold a reference of the index (_wormref_) to perform safe inde
 
 An example of using point-query operations using the `whsafe` API.
 
+```C
     index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
     ref = whsafe_ref(index);
     for (...) {
@@ -148,9 +151,11 @@ An example of using point-query operations using the `whsafe` API.
     ... // other safe operations
     wormhole_unref(ref);
     wormhole_destroy(index);
+```
 
 An example of range-query operations:
 
+```C
     ref = whsafe_ref(index);
     // ... assume we already have a valid ref
     iter = wormhole_iter_create(ref);
@@ -173,12 +178,14 @@ An example of range-query operations:
     // ... do something
     // must destroy iterators before unref()
     wormhole_unref(ref);
+```
 
 ### The `wormhole` API
 Similar to `whsafe`, `wormhole` is also thread safe. It's often faster than `whsafe` but requires extra caution when using it.
 
 An example of using point-query operations using the `wormhole` API.
 
+```C
     index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
     ref = wormhole_ref(index);
     for (...) {
@@ -190,9 +197,11 @@ An example of using point-query operations using the `wormhole` API.
     ... // other safe operations
     wormhole_unref(ref);
     wormhole_destroy(index);
+```
 
 An example of range-query operations:
 
+```C
     ref = wormhole_ref(index);
     // ... assume we already have a valid ref
     iter = wormhole_iter_create(ref);
@@ -217,6 +226,7 @@ An example of range-query operations:
     // ... do something
     // must destroy iterators before unref()
     wormhole_unref(ref);
+```
 
 ### Avoid blocking writers when using the `wormhole` API
 Wormhole internally uses QSBR RCU to synchronize readers/writers so every holder of a reference (`ref`)
@@ -227,30 +237,36 @@ If a ref-holder is about to become inactive from Wormhole's perspective (doing s
 it is recommended that the holder temporarily releases the `ref` before entering the inactive status (such as calling `sleep(10)`),
 and obtains a new `ref` before performing the next index operation.
 
+```C
     // holding a ref
     wormhole_unref(ref);  // warning: this can slowdown your program
     sleep(10);
     ref = wormhole_ref(map);  // warning: this can slowdown your program
     // perform index operations with (the new) ref
+```
 
 However, frequently calling `wormhole_ref()` and `wormhole_unref()` can be expensive because they acquire locks internally.
 A better solution can be used if the ref-holder thread can periodically update its quiescent state by calling `wormhole_refresh_qstate()`.
 This method has negligible cost (only two instructions).
 For example:
 
+```C
     // holding a ref
     while (wait_for_client_with_timeout_10us(...)) {
       wormhole_refresh_qstate(ref);  // only two mov instructions on x86_64
     }
     // perform index operations with ref
+```
 
 A common scenario of dead-locking is when acquiring locks while holding a wormhole reference,
 since `lock()` functions will block-wait and the calling thread won't be able to update the quiescent state.
 It is recommanded to always use `trylock()` in a loop and keep updating the qstate:
 
+```C
     while (pthread_mutex_trylock(&some_lock) == EBUSY) {
         wormhole_refresh_qstate(ref);
     }
+```
 
 The above issues with QSBR are all gone with `whsafe`.
 
@@ -259,6 +275,7 @@ A set of *thread-unsafe* functions are also provided. See the functions with _pr
 The thread-unsafe functions don't use the reference (_wormref_).
 Simply feed them with the pointer to the wormhole index:
 
+```C
     index = whunsafe_create(NULL);
     for (...) {
       whunsafe_set(index, ...);
@@ -268,12 +285,14 @@ Simply feed them with the pointer to the wormhole index:
     }
     ... // other unsafe operations
     wormhole_destroy(index);
+```
 
 ### In-place update with user-defined function
 `wormhole_inp` executes a user-defined function on an existing key-value item.
 If the key does not exist, a NULL pointer will be passed to the user-defined function.
 A simple example would be incrementing a counter stored in a key-value pair.
 
+```C
     // user-defined in-place update function
     void myadd1(struct kv * kv, void * priv) {
       if (kv != NULL) {
@@ -291,6 +310,7 @@ A simple example would be incrementing a counter stored in a key-value pair.
     // perform +1 on the stored value
     struct kref kref = kv_ref(tmp); // create a kref of tmp
     wormhole_inp(ref, &kref, myadd1, NULL);
+```
 
 Note that the user-defined function should ONLY change the value's content, and nothing else.
 Otherwise, the index can be corrupted.
@@ -298,6 +318,7 @@ A similar mechanism is also provided for iterators (`wormhole_iter_inp`).
 
 The inplace function can also be used to retrieve key-value data. For example:
 
+```C
     void inplace_getu64(struct kv * kv, void * priv) {
       if (kv != NULL) {
         assert(kv->vlen >= sizeof(u64));
@@ -311,6 +332,7 @@ The inplace function can also be used to retrieve key-value data. For example:
     struct kref kref = ...
     u64 val;
     wormhole_inp(ref, &kref, inplace_getu64, &val);
+```
 
 ### `merge`: atomic Read-Modify-Write
 The `wormhole_merge` and `whsafe_merge` functions perform atomic Read-Modify-Write (RMW) operations.
@@ -345,6 +367,7 @@ The customization will _only_ affect the internal `struct kv` objects.
 Actually, the memory manager can be configured to directly use the caller's `struct kv` object and store it in Wormhole.
 This `struct kvmap_mm` structure shows an example:
 
+```C
     const struct kvmap_mm kvmap_mm_ualloc {
       .in = kvmap_mm_in_noop, // in wormhole_set(), store caller's kv in wh
       .out = kvmap_mm_out_dup, // but still make a copy in wormhole_get()
@@ -358,6 +381,7 @@ This `struct kvmap_mm` structure shows an example:
     ...
     wormhole_set(ref, newkv);
     // Don't free newkv! it's now managed by wh
+```
 
 Each of the in/out/free functions can be freely customized.
 A few `kvmap_mm_*` functions are already provided for common scenarios.
