@@ -257,30 +257,31 @@ and reactivate the `ref` before performing the next index operation.
 }
 ```
 
-A common scenario of dead-locking is when acquiring locks while holding a wormhole reference,
+A common scenario of dead-locking is acquiring locks with an active wormhole reference,
 The following example could cause deadlock between two threads.
 
 ```C
 // Thread A has an active ref and try to lock()
 {
     struct wormref * ref = wormhole_ref(wh);
-    lock(just_a_lock); // << block here
+    lock(just_a_lock); // << block here forever
 }
 
 // Thread B already acquired the lock and wants to insert a key to wh
 {
     lock(just_a_lock);
-    wormhole_set(ref, kv); << block here
+    wormhole_set(ref, kv); << block here forever
 }
 ```
 
-To avoid this scenario, thread A should call `wormhole_park(ref)` before acquiring the lock, or use a loop to keep updating the qstate of the ref:
+To avoid this scenario, thread A should either call `wormhole_park(ref)` before acquiring the lock, or keep updating the qstate of the ref:
 ```C
 // Solution A.1: use wormhole_park()
 {
     struct wormref * ref = wormhole_ref(wh);
     wormhole_park(ref);
     lock(just_a_lock);
+    wormhole_resume(ref); // can use ref afterward
 }
 
 // Solution A.2: use try_lock and wormhole_refresh_qstate()
@@ -289,6 +290,7 @@ To avoid this scenario, thread A should call `wormhole_park(ref)` before acquiri
     while (!try_lock(just_a_lock)) {
         wormhole_refresh_qstate(ref);
     }
+    // continue to use ref
 }
 ```
 
