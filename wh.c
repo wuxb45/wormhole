@@ -2074,7 +2074,7 @@ wormmeta_split(struct wormhmap * const hmap, struct wormleaf * const leaf,
   // adjust maxplen; i is the plen of the last _touch()
   if (i > hmap->maxplen)
     hmap->maxplen = i;
-  debug_assert(i < 65520);
+  debug_assert(i <= UINT16_MAX);
 
   // restore klen
   mkey->klen = mklen;
