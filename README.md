@@ -193,7 +193,7 @@ An example of using point-query operations using the `wormhole` API.
 
 ```C
 {
-    index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
+    wh = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
     ref = wormhole_ref(wh);
     for (...) {
       wormhole_set(ref, ...);
