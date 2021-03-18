@@ -143,8 +143,8 @@ An example of using point-query operations using the `whsafe` API.
 
 ```C
 {
-    index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
-    ref = whsafe_ref(index);
+    wh = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
+    ref = whsafe_ref(wh);
     for (...) {
       whsafe_set(ref, ...);
       whsafe_get(ref, ...);
@@ -153,7 +153,7 @@ An example of using point-query operations using the `whsafe` API.
     }
     ... // other safe operations
     wormhole_unref(ref);
-    wormhole_destroy(index);
+    wormhole_destroy(wh);
 }
 ```
 
@@ -161,7 +161,7 @@ An example of range-query operations:
 
 ```C
 {
-    ref = whsafe_ref(index);
+    ref = whsafe_ref(wh);
     // ... assume we already have a valid ref
     iter = wormhole_iter_create(ref);
     for (...) {
@@ -194,7 +194,7 @@ An example of using point-query operations using the `wormhole` API.
 ```C
 {
     index = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
-    ref = wormhole_ref(index);
+    ref = wormhole_ref(wh);
     for (...) {
       wormhole_set(ref, ...);
       wormhole_get(ref, ...);
@@ -203,7 +203,7 @@ An example of using point-query operations using the `wormhole` API.
     }
     ... // other safe operations
     wormhole_unref(ref);
-    wormhole_destroy(index);
+    wormhole_destroy(wh);
 }
 ```
 
@@ -211,7 +211,7 @@ An example of range-query operations:
 
 ```C
 {
-    ref = wormhole_ref(index);
+    ref = wormhole_ref(wh);
     // ... assume we already have a valid ref
     iter = wormhole_iter_create(ref);
     for (...) {
@@ -303,15 +303,15 @@ Simply feed them with the pointer to the wormhole index:
 
 ```C
 {
-    index = whunsafe_create(NULL);
+    wh = whunsafe_create(NULL);
     for (...) {
-      whunsafe_set(index, ...);
-      whunsafe_get(index, ...);
-      whunsafe_del(index, ...);
+      whunsafe_set(wh, ...);
+      whunsafe_get(wh, ...);
+      whunsafe_del(wh, ...);
       ... // other unsafe operations
     }
     ... // other unsafe operations
-    wormhole_destroy(index);
+    wormhole_destroy(wh);
 }
 ```
 
