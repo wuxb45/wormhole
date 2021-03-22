@@ -3367,7 +3367,7 @@ wh_inp_copy_value(struct kv * const curr, void * const priv)
   if (curr) { // found
     struct wh_inp_info * const info = (typeof(info))priv;
     // copy the value data out
-    const u32 copy_size = info->vbuf_size < curr->klen ? info->vbuf_size : curr->klen;
+    const u32 copy_size = info->vbuf_size < curr->vlen ? info->vbuf_size : curr->vlen;
     memcpy(info->vbuf_out, kv_vptr_c(curr), copy_size);
     // copy the vlen out
     *info->vlen_out = curr->vlen;
@@ -3376,7 +3376,8 @@ wh_inp_copy_value(struct kv * const curr, void * const priv)
 
 // returns a boolean value indicating whether the key is found.
 // the value's data will be written to *vlen_out and vbuf_out if the key is found
-// We assume vbuf_out is large enough to hold the output value
+// if vbuf_size < vlen, then only the first vbuf_size bytes is copied to the buffer
+// a small vbuf_size can be used to reduce memcpy cost when only the first a few bytes are needed
   bool
 wh_get(struct wormref * const ref, const void * const kbuf, const u32 klen,
     void * const vbuf_out, const u32 vbuf_size, u32 * const vlen_out)
