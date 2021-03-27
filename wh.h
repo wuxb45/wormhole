@@ -297,52 +297,6 @@ wh_iter_park(struct wormhole_iter * const iter);
 wh_iter_destroy(struct wormhole_iter * const iter);
 // }}} wh
 
-// whu64 {{{
-// reuse original wormhole functions:
-// - wormhole_ref()
-// - wormhole_unref()
-// - wormhole_iter_create()
-// - wormhole_iter_valid()
-// - wormhole_iter_skip()
-// - wormhole_iter_park()
-// - wormhole_iter_destroy()
-
-  extern struct wormhole *
-wormhole_u64_create(const struct kvmap_mm * const mm);
-
-  extern void *
-wormhole_u64_get(struct wormref * const ref, const u64 key, void * const out);
-
-  extern bool
-wormhole_u64_probe(struct wormref * const ref, const u64 key);
-
-  extern bool
-wormhole_u64_set(struct wormref * const ref, const u64 key, void * const value);
-
-  extern bool
-wormhole_u64_del(struct wormref * const ref, const u64 key);
-
-  extern void
-wormhole_u64_iter_seek(struct wormhole_iter * const iter, const u64 key);
-
-  extern void *
-wormhole_u64_iter_peek(struct wormhole_iter * const iter, u64 * const key_out, void * const value_out);
-
-  extern void *
-wormhole_u64_iter_next(struct wormhole_iter * const iter, u64 * const key_out, void * const value_out);
-
-typedef int  (*whu64_iter_inp_func)(u64 key, void * value, void * priv);
-
-  extern bool
-wormhole_u64_iter_inp(struct wormhole_iter * const iter, whu64_iter_inp_func uf, void * const priv);
-
-  extern void
-wormhole_u64_clean(struct wormhole * const map);
-
-  extern void
-wormhole_u64_destroy(struct wormhole * const map);
-// }}} whu64
-
 #ifdef __cplusplus
 }
 #endif
