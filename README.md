@@ -455,4 +455,4 @@ On memory-allocation failure, the hash-table expansion function will block and w
 # Performance
 Some benchmarking results with some real-world datasets: See [this](https://github.com/wuxb45/wormhole/issues/5) page for more information.
 
-![Concurrent GET](https://user-images.githubusercontent.com/564235/65991356-d300b180-e452-11e9-9103-f0f7e8dae20b.png)
+![Concurrent GET](https://user-images.githubusercontent.com/564235/112712778-704d7200-8e9f-11eb-9f4d-795de46772d1.png)
