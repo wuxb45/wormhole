@@ -264,7 +264,7 @@ main(int argc, char ** argv)
   argc--;
   argv++;
   int n = -1;
-  if ((n = kvmap_api_helper(argc, argv, NULL, true, &si.api, &si.map)) < 0) {
+  if ((n = kvmap_api_helper(argc, argv, NULL, &si.api, &si.map)) < 0) {
     fprintf(stderr, "usage: api ... [<#keys>=10000 [<#load-threads>=1 [<#unload-threads>=1 [<#threads>=1 [<#co-per-thread>=0 (disabled) [<rounds>=1 [<epochs>=1]]]]]]]\n");
     kvmap_api_helper_message();
     exit(0);
