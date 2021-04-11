@@ -297,6 +297,7 @@ klen_compare(const u32 len1, const u32 len2)
 }
 
 // compare whether the two keys are identical
+// optimistic: do not check hash
   inline bool
 kv_match(const struct kv * const key1, const struct kv * const key2)
 {
@@ -305,6 +306,17 @@ kv_match(const struct kv * const key1, const struct kv * const key2)
   //  && (key1->klen == key2->klen)
   //  && (!memcmp(key1->kv, key2->kv, key1->klen));
   return (key1->klen == key2->klen) && (!memcmp(key1->kv, key2->kv, key1->klen));
+}
+
+// compare whether the two keys are identical
+// check hash first
+// pessimistic: return false quickly if their hashes mismatch
+  inline bool
+kv_match_hash(const struct kv * const key1, const struct kv * const key2)
+{
+  return (key1->hash == key2->hash)
+    && (key1->klen == key2->klen)
+    && (!memcmp(key1->kv, key2->kv, key1->klen));
 }
 
   inline bool
@@ -1020,7 +1032,7 @@ kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int 
     api->iter_kref(iter, &kref);
     dprintf(fd, "%010lu [%3u] %.*s\n", i, kref.len, kref.len, kref.ptr);
     i++;
-    api->iter_skip(iter, 1);
+    api->iter_skip1(iter);
   }
   api->iter_destroy(iter);
   kvmap_unref(api, ref);
