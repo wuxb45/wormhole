@@ -45,23 +45,23 @@ main(int argc, char ** argv)
   wh_resume(ref);
 
   // prepare a few keys for range ops
-  r = wh_set(ref, "00", 2, "0_value", 7);
-  r = wh_set(ref, "11", 2, "1_value", 7);
-  r = wh_set(ref, "22", 2, "2_value", 7);
+  wh_set(ref, "00", 2, "0_value", 7);
+  wh_set(ref, "11", 2, "1_value", 7);
+  wh_set(ref, "22", 2, "2_value", 7);
 
   struct wormhole_iter * const iter = wh_iter_create(ref);
 
   wh_iter_seek(iter, NULL, 0); // seek to the head
   printf("wh_iter_seek \"\"\n");
   while (wh_iter_valid(iter)) {
-    r = wh_iter_peek(iter, kbuf_out, &klen_out, vbuf_out, &vlen_out);
+    r = wh_iter_peek(iter, kbuf_out, 8, &klen_out, vbuf_out, 8, &vlen_out);
     if (r) {
       printf("wh_iter_peek klen=%u key=%.*s vlen=%u value=%.*s\n",
           klen_out, klen_out, kbuf_out, vlen_out, vlen_out, vbuf_out);
     } else {
       printf("ERROR!\n");
     }
-    wh_iter_skip(iter, 1);
+    wh_iter_skip1(iter);
   }
 
   // call iter_park if you will go idle but want to use the iter later
@@ -72,7 +72,7 @@ main(int argc, char ** argv)
   wh_iter_seek(iter, "0", 1);
   printf("wh_iter_seek \"0\"\n");
   // this time we don't want to copy the value
-  r = wh_iter_peek(iter, kbuf_out, &klen_out, NULL, NULL);
+  r = wh_iter_peek(iter, kbuf_out, 8, &klen_out, NULL, 0, NULL);
   if (r){
     printf("wh_iter_peek klen=%u key=%.*s\n", klen_out, klen_out, kbuf_out);
   } else {

@@ -288,8 +288,8 @@ wh_iter_valid(struct wormhole_iter * const iter);
 
   extern bool
 wh_iter_peek(struct wormhole_iter * const iter,
-    void * const kbuf_out, u32 * const klen_out,
-    void * const vbuf_out, u32 * const vlen_out);
+    void * const kbuf_out, const u32 kbuf_size, u32 * const klen_out,
+    void * const vbuf_out, const u32 vbuf_size, u32 * const vlen_out);
 
   extern void
 wh_iter_skip1(struct wormhole_iter * const iter);

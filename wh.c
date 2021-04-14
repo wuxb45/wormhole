@@ -3761,7 +3761,7 @@ wh_iter_valid(struct wormhole_iter * const iter)
 
 // for wh_iter_peek()
 // the out ptrs must be provided in pairs; use a pair of NULLs to ignore the key or value
-struct wh_iter_inp_info { void * kbuf_out; u32 * klen_out; void * vbuf_out; u32 * vlen_out; };
+struct wh_iter_inp_info { void * kbuf_out; void * vbuf_out; u32 kbuf_size; u32 vbuf_size; u32 * klen_out; u32 * vlen_out; };
 
 // a kv_inp_func; use this to retrieve the KV's data without unnecesary memory copying
   static void
@@ -3773,7 +3773,8 @@ inp_copy_kv_cb(struct kv * const curr, void * const priv)
     // copy the key
     if (info->kbuf_out) { // it assumes klen_out is also not NULL
       // copy the key data out
-      memcpy(info->kbuf_out, kv_kptr_c(curr), curr->klen);
+      const u32 clen = curr->klen < info->kbuf_size ? curr->klen : info->kbuf_size;
+      memcpy(info->kbuf_out, kv_kptr_c(curr), clen);
       // copy the klen out
       *info->klen_out = curr->klen;
     }
@@ -3781,7 +3782,8 @@ inp_copy_kv_cb(struct kv * const curr, void * const priv)
     // copy the value
     if (info->vbuf_out) { // it assumes vlen_out is also not NULL
       // copy the value data out
-      memcpy(info->vbuf_out, kv_vptr_c(curr), curr->vlen);
+      const u32 clen = curr->vlen < info->vbuf_size ? curr->vlen : info->vbuf_size;
+      memcpy(info->vbuf_out, kv_vptr_c(curr), clen);
       // copy the vlen out
       *info->vlen_out = curr->vlen;
     }
@@ -3791,10 +3793,10 @@ inp_copy_kv_cb(struct kv * const curr, void * const priv)
 // seek is similar to get
   bool
 wh_iter_peek(struct wormhole_iter * const iter,
-    void * const kbuf_out, u32 * const klen_out,
-    void * const vbuf_out, u32 * const vlen_out)
+    void * const kbuf_out, const u32 kbuf_size, u32 * const klen_out,
+    void * const vbuf_out, const u32 vbuf_size, u32 * const vlen_out)
 {
-  struct wh_iter_inp_info info = {kbuf_out, klen_out, vbuf_out, vlen_out};
+  struct wh_iter_inp_info info = {kbuf_out, vbuf_out, kbuf_size, vbuf_size, klen_out, vlen_out};
   return wh_api->iter_inp(iter, inp_copy_kv_cb, &info);
 }
 

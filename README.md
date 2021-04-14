@@ -84,7 +84,7 @@ Coding examples:
     r = wh_probe(ref, "abc", 3); // r == false
     u8 buf [6];
     u32 len_out;
-    r = wh_get(ref, "hello", 5, buf, &len_out); // r == true, len_out == 6, "world!" in buf (without trailing zero)
+    r = wh_get(ref, "hello", 5, buf, 6, &len_out); // r == true, len_out == 6, "world!" in buf (without trailing zero)
     struct wormhole_iter * iter = wh_iter_create(ref); // creates an iter on a ref
     wh_iter_seek(iter, "h", 1); // seek for the smallest key >= "h"; the iter will be placed on "hello"
     r = wh_iter_valid(iter); // r == true; You should always check if iter is valid after a seek() and skip()
