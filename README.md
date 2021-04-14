@@ -88,10 +88,10 @@ Coding examples:
     struct wormhole_iter * iter = wh_iter_create(ref); // creates an iter on a ref
     wh_iter_seek(iter, "h", 1); // seek for the smallest key >= "h"; the iter will be placed on "hello"
     r = wh_iter_valid(iter); // r == true; You should always check if iter is valid after a seek() and skip()
-    r = wh_iter_peek(iter, buf, &len_out, NULL, NULL); // only need the key: will get "hello" and 5
-    r = wh_iter_peek(iter, NULL, NULL, buf, &len_out); // only need the value: will get "world!" and 6
-    // (or you can get both in one call with all ptrs provided)
-    wh_iter_skip(iter, 1); // skip the current key
+    r = wh_iter_peek(iter, buf, 6, &len_out, NULL, 0, NULL); // only need the key: will get "hello" and 5
+    r = wh_iter_peek(iter, NULL, 0, NULL, buf, 6, &len_out); // only need the value: will get "world!" and 6
+    // (you can also get both key and value using one call with two buffers)
+    wh_iter_skip1(iter); // skip the current key; equivalent to wh_iter_skip(iter, 1);
     r = wh_iter_valid(iter); // r == false; already passed the end of the dataset
     wh_iter_park(iter); // an iter may hold locks; It's a good manner to "park" the iter before sleep. Don't block the intersection!
     sleep(10); // not interacting with the wormhole instance.
