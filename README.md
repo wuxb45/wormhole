@@ -127,7 +127,7 @@ Performing the hash calculation at the client side can achieve the best efficien
 There are three sets of Wormhole API: `whsafe`, `wormhole`, and `whunsafe`.
 * `whsafe`: The *worry-free* thread-safe API. If you use Wormhole in a concurrent environment and want minimal complexity in your code, you should use `whsafe`.
 * `wormhole`: The standard thread-safe API. It offers better efficiency than `whsafe` but requires some extra effort for blocking prevention.
-* `whunsafe`: the thread-unsafe API. It offers the best efficiency but does not perform internal concurrency control.
+* `whunsafe`: the thread-unsafe API. It offers the best speed and efficiency but does not perform internal concurrency control.
 External synchronization should be employed when accessing `whunsafe` in a concurrent environment.
 
 The functions of each API can be found near the end of `wh.c` (search `kvmap_api_whsafe`, `kvmap_api_wormhole`, and `kvmap_api_whunsafe`).
