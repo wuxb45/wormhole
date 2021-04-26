@@ -13,7 +13,7 @@ It has also been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a J
 ## NEWS
 
 * An old limitation about anchor keys has been removed (See Section 3.3 in the original paper for more details).
-Now Wormhole can store binary string keys of any patterns including any number of '\0's. A key's length can be 0 to UINT32_MAX bytes. (Internally: leaf-nodes' anchor key length <= UINT16_MAX).
+Now Wormhole can store binary string keys of any patterns including any number of '\0's. A key's length can be 0 to UINT32\_MAX bytes. (Internally: leaf-nodes' anchor key length <= UINT16\_MAX).
 
 * `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples.
 

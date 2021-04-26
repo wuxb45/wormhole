@@ -139,7 +139,7 @@ wormmeta_klen_load(const struct wormmeta * const meta)
   static inline struct wormleaf *
 wormmeta_lmost_load(const struct wormmeta * const meta)
 {
-  return u64_to_ptr(meta->l13.e3 & (~3lu));
+  return u64_to_ptr(meta->l13.e3 & (~0x3flu));
 }
 
   static inline u32
