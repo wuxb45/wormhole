@@ -27,7 +27,7 @@ main(int argc, char ** argv)
     wormhole_u64_set(ref, keys[i], (void *)~keys[i]); // (void *) is just a u64 value
   const double t1 = time_sec();
 
-  wormhole_verify(wh);
+  //wormhole_verify(wh);
 
   const double t2 = time_sec();
   debug_perf_switch();
