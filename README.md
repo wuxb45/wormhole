@@ -15,7 +15,7 @@ It has also been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a J
 * An old limitation about anchor keys has been removed (See Section 3.3 in the original paper for more details).
 Now Wormhole can store binary string keys of any patterns including any number of '\0's. A key's length can be 0 to UINT32\_MAX bytes. (Internally: leaf-nodes' anchor key length <= UINT16\_MAX).
 
-* `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples.
+* `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples. the `wh_` functions are thread-safe.
 
 * The `whsafe` API is a *worry-free* thread-safe wormhole API.
 At a small cost on each operation, users no longer need to call the `wormhole_refresh_qstate` in any circumstances.
