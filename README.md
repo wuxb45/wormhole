@@ -84,7 +84,7 @@ Coding examples:
     r = wh_probe(ref, "abc", 3); // r == false
     u8 buf [6];
     u32 len_out;
-    r = wh_get(ref, "hello", 5, buf, 6, &len_out); // r == true, len_out == 6, "world!" in buf (without trailing zero)
+    r = wh_get(ref, "hello", 5, buf, 6, &len_out); // r == true, len_out == 6, "world!" in buf (without the '\0')
     struct wormhole_iter * iter = wh_iter_create(ref); // creates an iter on a ref
     wh_iter_seek(iter, "h", 1); // seek for the smallest key >= "h"; the iter will be placed on "hello"
     r = wh_iter_valid(iter); // r == true; You should always check if iter is valid after a seek() and skip()
@@ -93,7 +93,7 @@ Coding examples:
     // (you can also get both key and value using one call with two buffers)
     wh_iter_skip1(iter); // skip the current key; equivalent to wh_iter_skip(iter, 1);
     r = wh_iter_valid(iter); // r == false; already passed the end of the dataset
-    wh_iter_park(iter); // an iter may hold locks; It's a good manner to "park" the iter before sleep. Don't block the intersection!
+    wh_iter_park(iter); // an iter may hold locks; It's a good manner to "park" the iter before sleep.
     sleep(10); // not interacting with the wormhole instance.
     wh_iter_seek(iter, NULL, 0); // need to do another seek to reactivate the iter
     r = wh_iter_valid(iter); // r == true; on the zero-sized key now
@@ -102,6 +102,28 @@ Coding examples:
     wh_del(ref, NULL, NULL); // delete the zero-sized key
     wh_unref(ref); // the current thread is no longer interested in accessing the index
     wh_destroy(wh); // fully destroy the index; all references should have been released before calling this
+}
+```
+
+## Integer keys
+
+Wormhole supports binary keys, which means you don't need to print integers into text when using Wormhole to index integer keys.
+Here are some quick examples for using Wormhole as an integer-key index. A little-endian CPU is assumed.
+
+```C
+{
+    // 32-bit unsigned integer keys
+    u32 key = __builtin_bswap32(1000); // reverse byte order of key 1000
+    wh_set(ref, &key, 4, NULL, 0);
+    key = __builtin_bswap32(2000); // reverse byte order of key 2000
+    wh_set(ref, &key, 4, NULL, 0);
+    struct wormhole_iter * iter = wh_iter_create(ref);
+    key = __builtin_bswap32(999);
+    wh_iter_seek(iter, &key, 4); // seek 999
+    u32 key_out, len_out;
+    r = wh_iter_peek(iter, &key_out, 4, &len_out, NULL, 0, NULL); // see 1000 in key_out in reversed byte order
+    wh_iter_skip1(iter);
+    r = wh_iter_peek(iter, &key_out, 4, &len_out, NULL, 0, NULL); // see 2000 in key_out in reversed byte order
 }
 ```
 
