@@ -2681,7 +2681,7 @@ strhex_64(void * const out, u64 v)
 {
 #if defined(__x86_64__)
   const m128 str = strhex_helper(v);
-  _mm_store_si128(out, str);
+  _mm_storeu_si128(out, str);
 #elif defined(__aarch64__)
   const m128 str = strhex_helper(v);
   vst1q_u8(out, str);
