@@ -457,8 +457,9 @@ The default is `((1lu << 21))` (2MB slabs). If 1GB hugepages are available, `WH_
 Using 1GB hugepages can improve search performance on a large dataset.
 
 * `WH_KPN` controls "Keys Per (leaf-)Node". The default value is 128.
-Compared to the default, `WH_KPN=256` can offer 5-10%+ higher search/update speed.
-However, random insertions can be slower due to more expensive sorting in each node.
+Compared to the default, `WH_KPN=256` can offer 5-10%+ higher point query and update speed.
+However, range queries prefer a smaller node size such as 64.
+
 
 * `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of active references) of the QSBR RCU.
 The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 23, 39, and 55, and `QSBR_SHARDS_NR` must be 2^n, n<=6.

@@ -339,7 +339,7 @@ struct kvmap_api {
   bool irefsafe; // true: iter's kref/kvref can be safely accessed after iter_seek/iter_skip/iter_park
   bool unique; // provide unique keys, especially for iterators
   bool refpark; // ref has park() and resume()
-  bool reserved;
+  bool async; // XXX for testing KVell
 
   // set (aka put/upsert): return true on success; false on error
   // mm.in() controls how things move into the kvmap; the default mm make a copy with malloc()

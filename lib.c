@@ -692,9 +692,16 @@ pages_do_alloc(const size_t size, const int flags)
   return p;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) && defined(MAP_HUGETLB)
+
+#if defined(MAP_HUGE_SHIFT)
 #define PAGES_FLAGS_1G ((MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)))
 #define PAGES_FLAGS_2M ((MAP_HUGETLB | (21 << MAP_HUGE_SHIFT)))
+#else // MAP_HUGE_SHIFT
+#define PAGES_FLAGS_1G ((MAP_HUGETLB))
+#define PAGES_FLAGS_2M ((MAP_HUGETLB))
+#endif // MAP_HUGE_SHIFT
+
 #else
 #define PAGES_FLAGS_1G ((0))
 #define PAGES_FLAGS_2M ((0))
