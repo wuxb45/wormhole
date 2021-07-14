@@ -20,11 +20,11 @@ main(int argc, char ** argv)
 
   bool r;
 
-  r = wh_set(ref, "wormhole", 8, "easy", 4);
-  printf("wh_set wormhole easy %c\n", r?'T':'F');
+  r = wh_put(ref, "wormhole", 8, "easy", 4);
+  printf("wh_put wormhole easy %c\n", r?'T':'F');
 
-  r = wh_set(ref, "time_travel", 11, "impossible", 10);
-  printf("wh_set time_travel impossible %c\n", r?'T':'F');
+  r = wh_put(ref, "time_travel", 11, "impossible", 10);
+  printf("wh_put time_travel impossible %c\n", r?'T':'F');
 
   r = wh_del(ref, "time_travel", 11);
   printf("wh_del time_travel %c\n", r?'T':'F');
@@ -46,9 +46,9 @@ main(int argc, char ** argv)
   wh_resume(ref);
 
   // prepare a few keys for range ops
-  wh_set(ref, "00", 2, "0_value", 7);
-  wh_set(ref, "11", 2, "1_value", 7);
-  wh_set(ref, "22", 2, "2_value", 7);
+  wh_put(ref, "00", 2, "0_value", 7);
+  wh_put(ref, "11", 2, "1_value", 7);
+  wh_put(ref, "22", 2, "2_value", 7);
 
   struct wormhole_iter * const iter = wh_iter_create(ref);
 

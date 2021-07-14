@@ -57,7 +57,7 @@ stress_load_worker(void * ptr)
     si->keys[i] = kv_create(buf, klen, buf, 8);
     if (si->keys[i] == NULL)
       exit(0);
-    kvmap_kv_set(si->api, ref, si->keys[i]);
+    kvmap_kv_put(si->api, ref, si->keys[i]);
   }
   free(buf);
   kvmap_unref(si->api, ref);
@@ -207,7 +207,7 @@ stress_func(struct stress_info * const si)
           kvmap_kv_inpw(api, ref, key, stress_inp_plus1, NULL);
         break;
       case 12: case 13: case 14: case 15:
-        if (!kvmap_kv_set(api, ref, key))
+        if (!kvmap_kv_put(api, ref, key))
           wfail1++;
         break;
       default:
@@ -272,7 +272,7 @@ main(int argc, char ** argv)
   argc -= n;
   argv += n;
 
-  const bool has_point = si.api->get && si.api->probe && si.api->del && si.api->set;
+  const bool has_point = si.api->get && si.api->probe && si.api->del && si.api->put;
   if (!has_point) {
     fprintf(stderr, "api not supported\n");
     exit(0);

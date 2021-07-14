@@ -30,7 +30,7 @@ kv_load_worker(struct wormhole * const wh)
   const u64 nz = (seq == (__nth - 1)) ? __nkeys : (__nkeys / __nth * (seq + 1));
   printf("load worker %lu %lu\n", n0, nz);
   for (u64 i = n0; i < nz; i++)
-    wormhole_set(ref, __samples[i]);
+    wormhole_put(ref, __samples[i]);
   wormhole_unref(ref);
   return NULL;
 }

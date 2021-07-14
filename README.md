@@ -24,7 +24,7 @@ At a small cost on each operation, users no longer need to call the `wormhole_re
 
 ## Highlights:
 
-* Thread-safety: all operations, including `get`, `set`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe.
+* Thread-safety: all operations, including `get`, `put`, `inplace-update (inp)`, `del`, `iter-seek`, `iter-peek`, `iter-skip` etc., are thread-safe.
 See `stresstest.c` for more thread-safe operations.
 
 * Keys can contain any value, including binary zeros (`'\0'`). Their sizes are always explicitly specified.
@@ -52,7 +52,7 @@ Alternatively, you may use `O=0g` to enable debug info and disable optimizations
 
     $ ./easydemo.out
 
-The `wh_{ref/unref/get/set/del/probe}` and  `wh_iter_{create/destroy/seek/skip/peek/park/valid}` functions are all thread-safe.
+The `wh_{ref/unref/get/put/del/probe}` and  `wh_iter_{create/destroy/seek/skip/peek/park/valid}` functions are all thread-safe.
 Each thread should acquire a private reference using `wh_ref` for KV operations.
 
 `concbench.out` is an example benchmarking tool of only 150 LoC. See the helper messages for more details.
@@ -77,8 +77,8 @@ Coding examples:
 {
     struct wormhole * wh = wh_create(); // create a new wormhole instance
     struct wormref * ref = wh_ref(wh); // to access wh, a thread must obtain a reference
-    wh_set(ref, "hello", 5, "world!", 6); // insert a kv pair
-    wh_set(ref, NULL, 0, NULL, 0); // both key and value can be zero-sized
+    wh_put(ref, "hello", 5, "world!", 6); // insert a kv pair
+    wh_put(ref, NULL, 0, NULL, 0); // both key and value can be zero-sized
     r = wh_probe(ref, "hello", 5); // r == true
     r = wh_probe(ref, NULL, 0); // r == true
     r = wh_probe(ref, "abc", 3); // r == false
@@ -114,9 +114,9 @@ Here are some quick examples for using Wormhole as an integer-key index. A littl
 {
     // 32-bit unsigned integer keys
     u32 key = __builtin_bswap32(1000); // reverse byte order of key 1000
-    wh_set(ref, &key, 4, NULL, 0);
+    wh_put(ref, &key, 4, NULL, 0);
     key = __builtin_bswap32(2000); // reverse byte order of key 2000
-    wh_set(ref, &key, 4, NULL, 0);
+    wh_put(ref, &key, 4, NULL, 0);
     struct wormhole_iter * iter = wh_iter_create(ref);
     key = __builtin_bswap32(999);
     wh_iter_seek(iter, &key, 4); // seek 999
@@ -168,7 +168,7 @@ An example of using point-query operations using the `whsafe` API.
     wh = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
     ref = whsafe_ref(wh);
     for (...) {
-      whsafe_set(ref, ...);
+      whsafe_put(ref, ...);
       whsafe_get(ref, ...);
       whsafe_del(ref, ...);
       ... // other safe operations
@@ -218,7 +218,7 @@ An example of using point-query operations using the `wormhole` API.
     wh = wormhole_create(NULL); // use NULL here unless you want to change the allocator.
     ref = wormhole_ref(wh);
     for (...) {
-      wormhole_set(ref, ...);
+      wormhole_put(ref, ...);
       wormhole_get(ref, ...);
       wormhole_del(ref, ...);
       ... // other safe operations
@@ -292,7 +292,7 @@ The following example could cause deadlock between two threads.
 // Thread B already acquired the lock and wants to insert a key to wh
 {
     lock(just_a_lock);
-    wormhole_set(ref, kv); << block here forever
+    wormhole_put(ref, kv); << block here forever
 }
 ```
 
@@ -327,7 +327,7 @@ Simply feed them with the pointer to the wormhole index:
 {
     wh = whunsafe_create(NULL);
     for (...) {
-      whunsafe_set(wh, ...);
+      whunsafe_put(wh, ...);
       whunsafe_get(wh, ...);
       whunsafe_del(wh, ...);
       ... // other unsafe operations
@@ -356,7 +356,7 @@ A simple example would be incrementing a counter stored in a key-value pair.
     // create the counter
     u64 zero = 0;
     struct kv * tmp = kv_create("counter", 7, &zero, 8); // malloc-ed
-    wormhole_set(ref, tmp);
+    wormhole_put(ref, tmp);
 
     // perform +1 on the stored value
     struct kref kref = kv_ref(tmp); // create a kref of tmp
@@ -424,7 +424,7 @@ This `struct kvmap_mm` structure shows an example:
 ```C
 {
     const struct kvmap_mm kvmap_mm_ualloc {
-      .in = kvmap_mm_in_noop, // in wormhole_set(), store caller's kv in wh
+      .in = kvmap_mm_in_noop, // in wormhole_put(), store caller's kv in wh
       .out = kvmap_mm_out_dup, // but still make a copy in wormhole_get()
       .free = kvmap_mm_free_free, // call free() for delete/update
     };
@@ -434,7 +434,7 @@ This `struct kvmap_mm` structure shows an example:
     ...
     struct kv * newkv = malloc(size);
     ...
-    wormhole_set(ref, newkv);
+    wormhole_put(ref, newkv);
     // Don't free newkv! it's now managed by wh
 }
 ```

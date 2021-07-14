@@ -41,7 +41,7 @@
 -K kvmap_kv_iter_seek
 -K kvmap_kv_merge
 -K kvmap_kv_probe
--K kvmap_kv_set
+-K kvmap_kv_put
 -K kvmap_mm_dup
 -K kvmap_mm_free_free
 -K kvmap_mm_free_noop
@@ -114,8 +114,8 @@
 -K whsafe_merge
 -K whsafe_probe
 -K whsafe_ref
--K whsafe_set
--K wh_set
+-K whsafe_put
+-K wh_put
 -K wh_unref
 -K whunsafe_create
 -K whunsafe_del
@@ -129,7 +129,7 @@
 -K whunsafe_iter_skip
 -K whunsafe_merge
 -K whunsafe_probe
--K whunsafe_set
+-K whunsafe_put
 -K wormhole_clean
 -K wormhole_create
 -K wormhole_del
@@ -157,5 +157,5 @@
 -K wormhole_ref
 -K wormhole_refresh_qstate
 -K wormhole_resume
--K wormhole_set
+-K wormhole_put
 -K wormhole_unref

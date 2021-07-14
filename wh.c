@@ -664,7 +664,7 @@ wormhole_kref_kv_match(const struct kref * const key, const struct kv * const cu
 }
 
   static inline void
-wormhole_qsbr_update_wait(struct wormref * const ref, const u64 v)
+wormhole_qsbr_update_pause(struct wormref * const ref, const u64 v)
 {
   qsbr_update(&ref->qref, v);
 #if defined(CORR)
@@ -921,7 +921,7 @@ wormhmap_expand(struct wormhmap * const hmap)
   u64 msize = wsize + psize;
   u8 * mem = pages_alloc_best(msize, true, &msize);
   if (mem == NULL) {
-    // We are at a very deep call stack from wormhole_set().
+    // We are at a very deep call stack from wormhole_put().
     // Gracefully handling the failure requires lots of changes.
     // Currently we simply wait for available memory
     // TODO: gracefully return with insertion failure
@@ -1378,7 +1378,7 @@ wormhole_jump_leaf_read(struct wormref * const ref, const struct kref * const ke
       const u64 v1 = wormhmap_version_load(wormhmap_load(map));
       if (wormleaf_version_load(leaf) > v)
         break;
-      wormhole_qsbr_update_wait(ref, v1);
+      wormhole_qsbr_update_pause(ref, v1);
     } while (true);
   } while (true);
 }
@@ -1406,7 +1406,7 @@ wormhole_jump_leaf_write(struct wormref * const ref, const struct kref * const k
       const u64 v1 = wormhmap_version_load(wormhmap_load(map));
       if (wormleaf_version_load(leaf) > v)
         break;
-      wormhole_qsbr_update_wait(ref, v1);
+      wormhole_qsbr_update_pause(ref, v1);
     } while (true);
   } while (true);
 }
@@ -2637,9 +2637,9 @@ whunsafe_meta_leaf_merge(struct wormhole * const map, struct wormleaf * const le
 }
 // }}} meta-merge
 
-// set {{{
+// put {{{
   bool
-wormhole_set(struct wormref * const ref, struct kv * const kv)
+wormhole_put(struct wormref * const ref, struct kv * const kv)
 {
   // we always allocate a new item on SET
   // future optimizations may perform in-place update
@@ -2675,16 +2675,16 @@ wormhole_set(struct wormref * const ref, struct kv * const kv)
 }
 
   bool
-whsafe_set(struct wormref * const ref, struct kv * const kv)
+whsafe_put(struct wormref * const ref, struct kv * const kv)
 {
   wormhole_resume(ref);
-  const bool r = wormhole_set(ref, kv);
+  const bool r = wormhole_put(ref, kv);
   wormhole_park(ref);
   return r;
 }
 
   bool
-whunsafe_set(struct wormhole * const map, struct kv * const kv)
+whunsafe_put(struct wormhole * const map, struct kv * const kv)
 {
   struct kv * const new = map->mm.in(kv, map->mm.priv);
   if (unlikely(new == NULL))
@@ -2820,7 +2820,7 @@ whunsafe_merge(struct wormhole * const map, const struct kref * const kref,
     map->mm.free(new, map->mm.priv);
   return rsi;
 }
-// }}} set
+// }}} put
 
 // inplace {{{
   bool
@@ -2891,7 +2891,7 @@ whunsafe_inp(struct wormhole * const map, const struct kref * const key,
     return false;
   }
 }
-// }}} set
+// }}} put
 
 // del {{{
   static void
@@ -3477,7 +3477,7 @@ const struct kvmap_api kvmap_api_wormhole = {
   .threadsafe = true,
   .unique = true,
   .refpark = true,
-  .set = (void *)wormhole_set,
+  .put = (void *)wormhole_put,
   .get = (void *)wormhole_get,
   .probe = (void *)wormhole_probe,
   .del = (void *)wormhole_del,
@@ -3511,7 +3511,7 @@ const struct kvmap_api kvmap_api_whsafe = {
   .ordered = true,
   .threadsafe = true,
   .unique = true,
-  .set = (void *)whsafe_set,
+  .put = (void *)whsafe_put,
   .get = (void *)whsafe_get,
   .probe = (void *)whsafe_probe,
   .del = (void *)whsafe_del,
@@ -3542,7 +3542,7 @@ const struct kvmap_api kvmap_api_whunsafe = {
   .hashkey = true,
   .ordered = true,
   .unique = true,
-  .set = (void *)whunsafe_set,
+  .put = (void *)whunsafe_put,
   .get = (void *)whunsafe_get,
   .probe = (void *)whunsafe_probe,
   .del = (void *)whunsafe_del,
@@ -3649,7 +3649,7 @@ wh_destroy(struct wormhole * const map)
 
 // Do set/put with explicit kv buffers
   bool
-wh_set(struct wormref * const ref, const void * const kbuf, const u32 klen,
+wh_put(struct wormref * const ref, const void * const kbuf, const u32 klen,
     const void * const vbuf, const u32 vlen)
 {
   struct kv * const newkv = kv_create(kbuf, klen, vbuf, vlen);
@@ -3657,7 +3657,7 @@ wh_set(struct wormref * const ref, const void * const kbuf, const u32 klen,
     return false;
   // must use with kvmap_mm_ndf (see below)
   // the newkv will be saved in the Wormhole and freed by Wormhole when upon deletion
-  return wh_api->set(ref, newkv);
+  return wh_api->put(ref, newkv);
 }
 
 // delete a key
