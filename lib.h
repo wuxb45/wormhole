@@ -42,6 +42,12 @@ extern "C" {
 #endif
 
 // types {{{
+#ifndef typeof
+#define typeof __typeof__
+#endif
+#ifndef asm
+#define asm __asm__
+#endif
 typedef char            s8;
 typedef short           s16;
 typedef int             s32;
@@ -92,7 +98,8 @@ typedef uint8x16_t m128;
 // }}} defs
 
 // const {{{
-#define PGSZ ((4096lu))
+#define PGBITS ((12))
+#define PGSZ ((1lu << PGBITS))
 // }}} const
 
 // math {{{

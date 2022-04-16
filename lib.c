@@ -952,8 +952,8 @@ struct fork_join_info {
     void ** argn;
   };
   union {
-    struct { volatile au32 ferr, jerr; };
-    volatile au64 xerr;
+    struct { au32 ferr, jerr; };
+    au64 xerr;
   };
 };
 
@@ -1618,6 +1618,8 @@ struct co {
   size_t stksz;
 };
 
+// not atomic: no concurrent access
+// volatile: avoid caching of co_curr
 static __thread struct co * volatile co_curr = NULL; // NULL in host
 
 // the stack sits under the struct co
@@ -2841,8 +2843,8 @@ struct qsbr_ref_real {
 #define QSBR_DEBUG_BTNR ((14))
   void * backtrace[QSBR_DEBUG_BTNR];
 #endif
-  volatile au64 qstate; // user updates it
-  struct qsbr_ref_real * volatile * pptr; // internal only
+  au64 qstate; // user updates it
+  au64 * pptr; // internal only
   struct qsbr_ref_real * park;
 };
 
@@ -2854,7 +2856,7 @@ struct qsbr {
   u64 padding0[5];
   struct qshard {
     au64 bitmap;
-    struct qsbr_ref_real * volatile ptrs[QSBR_STATES_NR];
+    au64 ptrs[QSBR_STATES_NR];
   } shards[QSBR_SHARD_NR];
 };
 
@@ -2895,7 +2897,8 @@ qsbr_register(struct qsbr * const q, struct qsbr_ref * const qref)
 
     const u64 bits1 = bits | (1lu << pos);
     if (atomic_compare_exchange_weak_explicit(&shard->bitmap, &bits, bits1, MO_ACQUIRE, MO_RELAXED)) {
-      shard->ptrs[pos] = ref;
+      atomic_store_explicit(&shard->ptrs[pos], (u64)ref, MO_RELAXED);
+      //shard->ptrs[pos] = ref;
 
       ref->pptr = &(shard->ptrs[pos]);
       ref->park = &q->target;
@@ -2919,7 +2922,8 @@ qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref)
   debug_assert(pos < QSBR_STATES_NR);
   debug_assert(shard->bitmap & (1lu << pos));
 
-  shard->ptrs[pos] = &q->target;
+  atomic_store_explicit(&shard->ptrs[pos], (u64)(&q->target), MO_RELAXED);
+  //shard->ptrs[pos] = &q->target;
   (void)atomic_fetch_and_explicit(&shard->bitmap, ~(1lu << pos), MO_RELEASE);
 #ifdef QSBR_DEBUG
   ref->tid = 0;
@@ -2937,7 +2941,7 @@ qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref)
 qsbr_update(struct qsbr_ref * const qref, const u64 v)
 {
   struct qsbr_ref_real * const ref = (typeof(ref))qref;
-  debug_assert((*ref->pptr) == ref); // must be unparked
+  debug_assert((*ref->pptr) == (u64)ref); // must be unparked
   // rcu update does not require release or acquire order
   qsbr_write_qstate(ref, v);
 }
@@ -2947,7 +2951,7 @@ qsbr_park(struct qsbr_ref * const qref)
 {
   cpu_cfence();
   struct qsbr_ref_real * const ref = (typeof(ref))qref;
-  *ref->pptr = ref->park;
+  atomic_store_explicit(ref->pptr, (u64)ref->park, MO_RELAXED);
 #ifdef QSBR_DEBUG
   ref->status = 0xfff; // parked
 #endif
@@ -2957,7 +2961,7 @@ qsbr_park(struct qsbr_ref * const qref)
 qsbr_resume(struct qsbr_ref * const qref)
 {
   struct qsbr_ref_real * const ref = (typeof(ref))qref;
-  *ref->pptr = ref;
+  atomic_store_explicit(ref->pptr, (u64)ref, MO_RELAXED);
 #ifdef QSBR_DEBUG
   ref->status = 0xf; // resumed
 #endif
@@ -2987,9 +2991,14 @@ qsbr_wait(struct qsbr * const q, const u64 target)
       const u64 bits1 = atomic_fetch_or_explicit(&(shard->bitmap), 1lu << 63, MO_ACQUIRE);
       for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
         const u64 bit = bits & -bits; // extract lowest bit
-        if (((bits1 & bit) == 0) ||
-            (atomic_load_explicit(&(shard->ptrs[__builtin_ctzl(bit)]->qstate), MO_CONSUME) == target))
+        if ((bits1 & bit) == 0) {
           bms[i] &= ~bit;
+        } else {
+          au64 * pptr = &(shard->ptrs[__builtin_ctzl(bit)]);
+          struct qsbr_ref_real * const ptr = (typeof(ptr))atomic_load_explicit(pptr, MO_RELAXED);
+          if (atomic_load_explicit(&(ptr->qstate), MO_CONSUME) == target)
+            bms[i] &= ~bit;
+        }
       }
       (void)atomic_fetch_and_explicit(&(shard->bitmap), ~(1lu << 63), MO_RELEASE);
       if (bms[i] == 0)

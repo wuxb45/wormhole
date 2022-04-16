@@ -1040,6 +1040,92 @@ kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int 
 }
 // }}} dump
 
+// kv64 {{{
+struct kv64 { // internal only
+  struct kv kv;
+  u64 key_be; // must be in big endian
+  u64 value;
+};
+
+  inline bool
+kvmap_kv64_get(const struct kvmap_api * const api, void * const ref,
+    const u64 key, u64 * const out)
+{
+  struct kv64 keybuf, kvout;
+  struct kref kref;
+  keybuf.key_be = __builtin_bswap64(key);
+  kref_ref_hash32(&kref, keybuf.kv.kv, sizeof(keybuf.key_be));
+  struct kv * const ret = api->get(ref, &kref, &kvout.kv);
+  if (ret) {
+    *out = kvout.value;
+    return true;
+  } else {
+    return false;
+  }
+}
+
+  inline bool
+kvmap_kv64_probe(const struct kvmap_api * const api, void * const ref,
+    const u64 key)
+{
+  struct kv64 keybuf;
+  struct kref kref;
+  keybuf.key_be = __builtin_bswap64(key);
+  kref_ref_hash32(&kref, keybuf.kv.kv, sizeof(keybuf.key_be));
+  return api->probe(ref, &kref);
+}
+
+  inline bool
+kvmap_kv64_put(const struct kvmap_api * const api, void * const ref,
+    const u64 key, const u64 value)
+{
+  struct kv64 kv;
+  kv.key_be = __builtin_bswap64(key);
+  kv.value = value;
+  kv.kv.klen = sizeof(key);
+  kv.kv.vlen = sizeof(value);
+  if (api->hashkey)
+    kv_update_hash(&kv.kv);
+
+  return api->put(ref, &kv.kv);
+}
+
+  inline bool
+kvmap_kv64_del(const struct kvmap_api * const api, void * const ref,
+    const u64 key)
+{
+  struct kv64 keybuf;
+  struct kref kref;
+  keybuf.key_be = __builtin_bswap64(key);
+  kref_ref_hash32(&kref, keybuf.kv.kv, sizeof(keybuf.key_be));
+  return api->del(ref, &kref);
+}
+
+  inline void
+kvmap_kv64_iter_seek(const struct kvmap_api * const api, void * const iter,
+    const u64 key)
+{
+  struct kv64 keybuf;
+  struct kref kref;
+  keybuf.key_be = __builtin_bswap64(key);
+  kref_ref_hash32(&kref, keybuf.kv.kv, sizeof(keybuf.key_be));
+  api->iter_seek(iter, &kref);
+}
+
+  inline bool
+kvmap_kv64_iter_peek(const struct kvmap_api * const api, void * const iter,
+    u64 * const key_out, u64 * const value_out)
+{
+  struct kv64 kvout;
+  struct kv * const ret = api->iter_peek(iter, &kvout.kv);
+  if (key_out)
+    *key_out = __builtin_bswap64(kvout.key_be); // to LE
+  if (value_out)
+    *value_out = kvout.value;
+  return ret != NULL;
+}
+// }}} kv64
+
 // }}} kvmap
 
 // vim:fdm=marker

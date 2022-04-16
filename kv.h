@@ -520,6 +520,30 @@ kvmap_raw_iter_seek(const struct kvmap_api * const api, void * const iter,
 
   extern u64
 kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int fd);
+
+  extern bool
+kvmap_kv64_get(const struct kvmap_api * const api, void * const ref,
+    const u64 key, u64 * const out);
+
+  extern bool
+kvmap_kv64_probe(const struct kvmap_api * const api, void * const ref,
+    const u64 key);
+
+  extern bool
+kvmap_kv64_put(const struct kvmap_api * const api, void * const ref,
+    const u64 key, const u64 value);
+
+  extern bool
+kvmap_kv64_del(const struct kvmap_api * const api, void * const ref,
+    const u64 key);
+
+  extern void
+kvmap_kv64_iter_seek(const struct kvmap_api * const api, void * const iter,
+    const u64 key);
+
+  extern bool
+kvmap_kv64_iter_peek(const struct kvmap_api * const api, void * const iter,
+    u64 * const key_out, u64 * const value_out);
 // }}} helpers
 
 // }}} kvmap

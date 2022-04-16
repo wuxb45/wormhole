@@ -89,7 +89,7 @@ static_assert(sizeof(struct wormhmap) == 64, "sizeof(wormhmap) != 64");
 struct wormhole {
   // 1 line
   union {
-    volatile au64 hmap_ptr; // safe
+    au64 hmap_ptr; // safe
     struct wormhmap * hmap; // unsafe
   };
   u64 padding0[6];
