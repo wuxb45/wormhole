@@ -10,7 +10,7 @@
 # X.out : xyz.h xyz.c # for extra dependences that are to be compiled/linked.
 
 # X => X.out
-TARGETS += easydemo concbench stresstest
+TARGETS += easydemo
 # X => X.c only
 SOURCES +=
 # X => X.S only

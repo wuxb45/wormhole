@@ -159,17 +159,11 @@ kv_match_hash(const struct kv * const key1, const struct kv * const key2);
   extern bool
 kv_match_full(const struct kv * const kv1, const struct kv * const kv2);
 
-  extern bool
-kv_match_kv128(const struct kv * const sk, const u8 * const kv128);
-
   extern int
 kv_compare(const struct kv * const kv1, const struct kv * const kv2);
 
   extern int
 kv_k128_compare(const struct kv * const sk, const u8 * const k128);
-
-  extern int
-kv_kv128_compare(const struct kv * const sk, const u8 * const kv128);
 
   extern void
 kv_qsort(struct kv ** const kvs, const size_t nr);
@@ -279,12 +273,6 @@ kref_lcp(const struct kref * const k1, const struct kref * const k2);
   extern u32
 kref_kv_lcp(const struct kref * const kref, const struct kv * const kv);
 
-  extern int
-kref_k128_compare(const struct kref * const sk, const u8 * const k128);
-
-  extern int
-kref_kv128_compare(const struct kref * const sk, const u8 * const kv128);
-
   extern const struct kref *
 kref_null(void);
 
@@ -300,20 +288,6 @@ kvref_dup2_key(struct kvref * const ref, struct kv * const to);
   extern int
 kvref_kv_compare(const struct kvref * const ref, const struct kv * const kv);
 // }}} ref
-
-// kv128 {{{
-  extern size_t
-kv128_estimate_kv(const struct kv * const kv);
-
-  extern u8 *
-kv128_encode_kv(const struct kv * const kv, u8 * const out, size_t * const pesize);
-
-  extern struct kv *
-kv128_decode_kv(const u8 * const ptr, struct kv * const out, size_t * const pesize);
-
-  extern size_t
-kv128_size(const u8 * const ptr);
-// }}} kv128
 
 // }}} kv
 

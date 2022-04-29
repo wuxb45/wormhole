@@ -196,15 +196,6 @@ crc32c_inc(const u8 * buf, u32 nr, u32 crc);
 // }}} crc32c
 
 // debug {{{
-  extern void
-debug_break(void);
-
-  extern void
-debug_backtrace(void);
-
-  extern void
-watch_u64_usr1(u64 * const ptr);
-
 #ifndef NDEBUG
   extern void
 debug_assert(const bool v);
@@ -215,16 +206,6 @@ debug_assert(const bool v);
 __attribute__((noreturn))
   extern void
 debug_die(void);
-
-__attribute__((noreturn))
-  extern void
-debug_die_perror(void);
-
-  extern void
-debug_dump_maps(FILE * const out);
-
-  extern bool
-debug_perf_switch(void);
 // }}} debug
 
 // mm {{{
@@ -385,71 +366,6 @@ mutex_unlock(mutex * const lock);
 mutex_deinit(mutex * const lock);
 // }}} locking
 
-// coroutine {{{
-extern u64 co_switch_stack(u64 * const saversp, const u64 newrsp, const u64 retval);
-
-struct co;
-
-  extern struct co *
-co_create(const u64 stacksize, void * func, void * priv, u64 * const host);
-
-  extern void
-co_reuse(struct co * const co, void * func, void * priv, u64 * const host);
-
-  extern struct co *
-co_fork(void * func, void * priv);
-
-  extern void *
-co_priv(void);
-
-  extern u64
-co_enter(struct co * const to, const u64 retval);
-
-  extern u64
-co_switch_to(struct co * const to, const u64 retval);
-
-  extern u64
-co_back(const u64 retval);
-
-  extern void
-co_exit(const u64 retval);
-
-  extern bool
-co_valid(struct co * const co);
-
-  extern struct co *
-co_self(void);
-
-  extern void
-co_destroy(struct co * const co);
-
-struct corr;
-
-  extern struct corr *
-corr_create(const u64 stacksize, void * func, void * priv, u64 * const host);
-
-  extern struct corr *
-corr_link(const u64 stacksize, void * func, void * priv, struct corr * const prev);
-
-  extern void
-corr_reuse(struct corr * const co, void * func, void * priv, u64 * const host);
-
-  extern void
-corr_relink(struct corr * const co, void * func, void * priv, struct corr * const prev);
-
-  extern void
-corr_enter(struct corr * const co);
-
-  extern void
-corr_yield(void);
-
-  extern void
-corr_exit(void);
-
-  extern void
-corr_destroy(struct corr * const co);
-// }}} coroutine
-
 // bits {{{
   extern u32
 bits_reverse_u32(const u32 v);
@@ -493,26 +409,6 @@ bits_round_down(const u64 v, const u8 power);
   extern u64
 bits_round_down_a(const u64 v, const u64 a);
 // }}} bits
-
-// vi128 {{{
-  extern u32
-vi128_estimate_u32(const u32 v);
-
-  extern u8 *
-vi128_encode_u32(u8 * dst, u32 v);
-
-  extern const u8 *
-vi128_decode_u32(const u8 * src, u32 * const out);
-
-  extern u32
-vi128_estimate_u64(const u64 v);
-
-  extern u8 *
-vi128_encode_u64(u8 * dst, u64 v);
-
-  extern const u8 *
-vi128_decode_u64(const u8 * src, u64 * const out);
-// }}} vi128
 
 // misc {{{
 // TODO: only works on little endian?

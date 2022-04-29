@@ -326,19 +326,6 @@ kv_match_full(const struct kv * const kv1, const struct kv * const kv2)
     && (!memcmp(kv1, kv2, sizeof(*kv1) + kv1->klen + kv1->vlen));
 }
 
-  bool
-kv_match_kv128(const struct kv * const sk, const u8 * const kv128)
-{
-  debug_assert(sk);
-  debug_assert(kv128);
-
-  u32 klen128 = 0;
-  u32 vlen128 = 0;
-  const u8 * const pdata = vi128_decode_u32(vi128_decode_u32(kv128, &klen128), &vlen128);
-  (void)vlen128;
-  return (sk->klen == klen128) && (!memcmp(sk->kv, pdata, klen128));
-}
-
   inline int
 kv_compare(const struct kv * const kv1, const struct kv * const kv2)
 {
@@ -354,32 +341,6 @@ kv_compare_ptrs(const void * const p1, const void * const p2)
   const struct kv * const * const pp1 = (typeof(pp1))p1;
   const struct kv * const * const pp2 = (typeof(pp2))p2;
   return kv_compare(*pp1, *pp2);
-}
-
-  int
-kv_k128_compare(const struct kv * const sk, const u8 * const k128)
-{
-  debug_assert(sk);
-  const u32 klen1 = sk->klen;
-  u32 klen2 = 0;
-  const u8 * const ptr2 = vi128_decode_u32(k128, &klen2);
-  debug_assert(ptr2);
-  const u32 len = (klen1 < klen2) ? klen1 : klen2;
-  const int cmp = memcmp(sk->kv, ptr2, len);
-  return cmp ? cmp : klen_compare(klen1, klen2);
-}
-
-  int
-kv_kv128_compare(const struct kv * const sk, const u8 * const kv128)
-{
-  debug_assert(sk);
-  const u32 klen1 = sk->klen;
-  u32 klen2 = 0;
-  u32 vlen2 = 0;
-  const u8 * const ptr2 = vi128_decode_u32(vi128_decode_u32(kv128, &klen2), &vlen2);
-  const u32 len = (klen1 < klen2) ? klen1 : klen2;
-  const int cmp = memcmp(sk->kv, ptr2, len);
-  return cmp ? cmp : klen_compare(klen1, klen2);
 }
 
   inline void
@@ -662,34 +623,6 @@ kref_kv_lcp(const struct kref * const kref, const struct kv * const kv)
   return memlcp(kref->ptr, kv->kv, max);
 }
 
-// klen, key, ...
-  inline int
-kref_k128_compare(const struct kref * const sk, const u8 * const k128)
-{
-  debug_assert(sk);
-  const u32 klen1 = sk->len;
-  u32 klen2 = 0;
-  const u8 * const ptr2 = vi128_decode_u32(k128, &klen2);
-  debug_assert(ptr2);
-  const u32 len = (klen1 < klen2) ? klen1 : klen2;
-  const int cmp = memcmp(sk->ptr, ptr2, len);
-  return cmp ? cmp : klen_compare(klen1, klen2);
-}
-
-// klen, vlen, key, ...
-  inline int
-kref_kv128_compare(const struct kref * const sk, const u8 * const kv128)
-{
-  debug_assert(sk);
-  const u32 klen1 = sk->len;
-  u32 klen2 = 0;
-  u32 vlen2 = 0;
-  const u8 * const ptr2 = vi128_decode_u32(vi128_decode_u32(kv128, &klen2), &vlen2);
-  const u32 len = (klen1 < klen2) ? klen1 : klen2;
-  const int cmp = memcmp(sk->ptr, ptr2, len);
-  return cmp ? cmp : klen_compare(klen1, klen2);
-}
-
 static struct kref __kref_null = {.hash32 = KV_CRC32C_SEED};
 
   inline const struct kref *
@@ -747,54 +680,6 @@ kvref_kv_compare(const struct kvref * const ref, const struct kv * const kv)
   return cmp ? cmp : klen_compare(ref->hdr.klen, kv->klen);
 }
 // }}} kvref
-
-// kv128 {{{
-// estimate the encoded size
-  inline size_t
-kv128_estimate_kv(const struct kv * const kv)
-{
-  return vi128_estimate_u32(kv->klen) + vi128_estimate_u32(kv->vlen) + kv->klen + kv->vlen;
-}
-
-// create a kv128 from kv
-  u8 *
-kv128_encode_kv(const struct kv * const kv, u8 * const out, size_t * const pesize)
-{
-  u8 * const ptr = out ? out : malloc(kv128_estimate_kv(kv));
-  if (!ptr)
-    return NULL;
-
-  u8 * const pdata = vi128_encode_u32(vi128_encode_u32(ptr, kv->klen), kv->vlen);
-  memcpy(pdata, kv->kv, kv->klen + kv->vlen);
-
-  if (pesize)
-    *pesize = (size_t)(pdata - ptr) + kv->klen + kv->vlen;
-  return ptr; // return the head of the encoded kv128
-}
-
-// dup kv128 to a kv
-  struct kv *
-kv128_decode_kv(const u8 * const ptr, struct kv * const out, size_t * const pesize)
-{
-  u32 klen, vlen;
-  const u8 * const pdata = vi128_decode_u32(vi128_decode_u32(ptr, &klen), &vlen);
-  struct kv * const ret = out ? out : malloc(sizeof(struct kv) + klen + vlen);
-  if (ret)
-    kv_refill(ret, pdata, klen, pdata + klen, vlen);
-
-  if (pesize)
-    *pesize = (size_t)(pdata - ptr) + klen + vlen;
-  return ret; // return the kv
-}
-
-  inline size_t
-kv128_size(const u8 * const ptr)
-{
-  u32 klen, vlen;
-  const u8 * const pdata = vi128_decode_u32(vi128_decode_u32(ptr, &klen), &vlen);
-  return ((size_t)(pdata - ptr)) + klen + vlen;
-}
-// }}} kv128
 
 // }}} kv
 
