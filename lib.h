@@ -124,26 +124,6 @@ srandom_u64(const u64 seed);
 random_double(void);
 // }}} random
 
-// timing {{{
-  extern u64
-time_nsec(void);
-
-  extern double
-time_sec(void);
-
-  extern u64
-time_diff_nsec(const u64 last);
-
-  extern double
-time_diff_sec(const double last);
-
-  extern void
-time_stamp(char * str, const size_t size);
-
-  extern void
-time_stamp2(char * str, const size_t size);
-// }}} timing
-
 // cpucache {{{
   extern void
 cpu_pause(void);

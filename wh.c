@@ -925,16 +925,10 @@ wormhmap_expand(struct wormhmap * const hmap)
     // Gracefully handling the failure requires lots of changes.
     // Currently we simply wait for available memory
     // TODO: gracefully return with insertion failure
-    char ts[64];
-    time_stamp(ts, 64);
-    fprintf(stderr, "%s %s sleep-wait for memory allocation %lukB\n",
-        __func__, ts, msize >> 10);
     do {
       sleep(1);
       mem = pages_alloc_best(msize, true, &msize);
     } while (mem == NULL);
-    time_stamp(ts, 64);
-    fprintf(stderr, "%s %s memory allocation done\n", __func__, ts);
   }
 
   struct wormhmap hmap1 = *hmap;
