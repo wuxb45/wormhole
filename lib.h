@@ -102,28 +102,6 @@ typedef uint8x16_t m128;
 #define PGSZ ((1lu << PGBITS))
 // }}} const
 
-// math {{{
-  extern u64
-mhash64(const u64 v);
-
-  extern u32
-mhash32(const u32 v);
-
-  extern u64
-gcd64(u64 a, u64 b);
-// }}} math
-
-// random {{{
-  extern u64
-random_u64(void);
-
-  extern void
-srandom_u64(const u64 seed);
-
-  extern double
-random_double(void);
-// }}} random
-
 // cpucache {{{
   extern void
 cpu_pause(void);
@@ -226,40 +204,6 @@ pages_alloc_1gb(const size_t nr_1gb);
   extern void *
 pages_alloc_best(const size_t size, const bool try_1gb, u64 * const size_out);
 // }}} mm
-
-// process/thread {{{
-  extern void
-thread_get_name(const pthread_t pt, char * const name, const size_t len);
-
-  extern void
-thread_set_name(const pthread_t pt, const char * const name);
-
-  extern long
-process_get_rss(void);
-
-  extern u32
-process_affinity_count(void);
-
-  extern u32
-process_getaffinity_list(const u32 max, u32 * const cores);
-
-  extern void
-thread_setaffinity_list(const u32 nr, const u32 * const list);
-
-  extern void
-thread_pin(const u32 cpu);
-
-  extern u64
-process_cpu_time_usec(void);
-
-// if args == true, argx is void **
-// if args == false, argx is void *
-  extern u64
-thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const argx);
-
-  extern int
-thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg);
-// }}} process/thread
 
 // locking {{{
 typedef union {
@@ -430,10 +374,6 @@ fdsize(const int fd);
 
   extern u32
 memlcp(const u8 * const p1, const u8 * const p2, const u32 max);
-
-__attribute__ ((format (printf, 2, 3)))
-  extern void
-logger_printf(const int fd, const char * const fmt, ...);
 // }}} misc
 
 // slab {{{
@@ -466,50 +406,6 @@ slab_get_nalloc(struct slab * const slab);
   extern void
 slab_destroy(struct slab * const slab);
 // }}}  slab
-
-// string {{{
-// XXX strdec_ and strhex_ functions does not append the trailing '\0' to the output string
-// size of out should be >= 10
-  extern void
-strdec_32(void * const out, const u32 v);
-
-// size of out should be >= 20
-  extern void
-strdec_64(void * const out, const u64 v);
-
-// size of out should be >= 8
-  extern void
-strhex_32(void * const out, const u32 v);
-
-// size of out should be >= 16
-  extern void
-strhex_64(void * const out, const u64 v);
-
-  extern u64
-a2u64(const void * const str);
-
-  extern u32
-a2u32(const void * const str);
-
-  extern s64
-a2s64(const void * const str);
-
-  extern s32
-a2s32(const void * const str);
-
-  extern void
-str_print_hex(FILE * const out, const void * const data, const u32 len);
-
-  extern void
-str_print_dec(FILE * const out, const void * const data, const u32 len);
-
-// user should free returned ptr (and nothing else) after use
-  extern char **
-strtoks(const char * const str, const char * const delim);
-
-  extern u32
-strtoks_count(const char * const * const toks);
-// }}} string
 
 // qsbr {{{
 // QSBR vs EBR (Quiescent-State vs Epoch Based Reclaimation)
