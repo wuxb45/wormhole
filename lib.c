@@ -525,6 +525,7 @@ debug_dump_maps(FILE * const out)
     if (r1 < 0) break;
     fprintf(out, "%s", line0);
   }
+  free(line0);
   fflush(out);
   fclose(in);
 }
