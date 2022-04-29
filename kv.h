@@ -100,16 +100,6 @@ kv_refill_str_str(struct kv * const kv, const char * const key,
 kv_refill_u64(struct kv * const kv, const u64 key, const void * const value, const u32 vlen);
 
   extern void
-kv_refill_hex32(struct kv * const kv, const u32 hex, const void * const value, const u32 vlen);
-
-  extern void
-kv_refill_hex64(struct kv * const kv, const u64 hex, const void * const value, const u32 vlen);
-
-  extern void
-kv_refill_hex64_klen(struct kv * const kv, const u64 hex, const u32 klen,
-    const void * const value, const u32 vlen);
-
-  extern void
 kv_refill_kref(struct kv * const kv, const struct kref * const kref);
 
   extern void
@@ -188,9 +178,6 @@ kv_vptr_c(const struct kv * const kv);
 
   extern const void *
 kv_kptr_c(const struct kv * const kv);
-
-  extern void
-kv_print(const struct kv * const kv, const char * const cmd, FILE * const out);
 // }}} kv
 
 // mm {{{

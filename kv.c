@@ -110,39 +110,6 @@ kv_refill_u64(struct kv * const kv, const u64 key, const void * const value, con
 }
 
   inline void
-kv_refill_hex32(struct kv * const kv, const u32 hex, const void * const value, const u32 vlen)
-{
-  kv->klen = 8;
-  strhex_32(kv->kv, hex);
-  kv_refill_value(kv, value, vlen);
-  kv_update_hash(kv);
-}
-
-  inline void
-kv_refill_hex64(struct kv * const kv, const u64 hex, const void * const value, const u32 vlen)
-{
-  kv->klen = 16;
-  strhex_64(kv->kv, hex);
-  kv_refill_value(kv, value, vlen);
-  kv_update_hash(kv);
-}
-
-  inline void
-kv_refill_hex64_klen(struct kv * const kv, const u64 hex,
-    const u32 klen, const void * const value, const u32 vlen)
-{
-  strhex_64(kv->kv, hex);
-  if (klen > 16) {
-    kv->klen = klen;
-    memset(kv->kv + 16, '!', klen - 16);
-  } else {
-    kv->klen = 16;
-  }
-  kv_refill_value(kv, value, vlen);
-  kv_update_hash(kv);
-}
-
-  inline void
 kv_refill_kref(struct kv * const kv, const struct kref * const kref)
 {
   kv->klen = kref->len;
@@ -447,35 +414,6 @@ kv_kptr_c(const struct kv * const kv)
   return (const void *)(&(kv->kv[0]));
 }
 // }}} ptr
-
-// print {{{
-// cmd "KV" K and V can be 's': string, 'x': hex, 'd': dec, or else for not printing.
-// n for newline after kv
-  void
-kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
-{
-  debug_assert(cmd);
-  const u32 klen = kv->klen;
-  fprintf(out, "#%016lx k[%3u]", kv->hash, klen);
-
-  switch(cmd[0]) {
-  case 's': fprintf(out, " %.*s", klen, kv->kv); break;
-  case 'x': str_print_hex(out, kv->kv, klen); break;
-  case 'd': str_print_dec(out, kv->kv, klen); break;
-  default: break;
-  }
-
-  const u32 vlen = kv->vlen;
-  switch (cmd[1]) {
-  case 's': fprintf(out, "  v[%4u] %.*s", vlen, vlen, kv->kv+klen); break;
-  case 'x': fprintf(out, "  v[%4u]", vlen); str_print_hex(out, kv->kv+klen, vlen); break;
-  case 'd': fprintf(out, "  v[%4u]", vlen); str_print_dec(out, kv->kv+klen, vlen); break;
-  default: break;
-  }
-  if (strchr(cmd, 'n'))
-    fprintf(out, "\n");
-}
-// }}} print
 
 // mm {{{
   struct kv *
