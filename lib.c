@@ -2866,6 +2866,9 @@ qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
   memset(q, 0, sizeof(*q));
+  for (u32 shard = 0; shard < QSBR_SHARD_NR; shard++)
+    for (u32 slot = 0; slot < QSBR_STATES_NR; slot++)
+      atomic_store_explicit(&q->shards[shard].ptrs[slot], (u64)(&q->target), MO_RELAXED);
   return q;
 }
 
