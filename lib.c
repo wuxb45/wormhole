@@ -2865,6 +2865,8 @@ struct qsbr {
 qsbr_create(void)
 {
   struct qsbr * const q = yalloc(sizeof(*q));
+  if (q == NULL)
+    return NULL;
   memset(q, 0, sizeof(*q));
   for (u32 shard = 0; shard < QSBR_SHARD_NR; shard++)
     for (u32 slot = 0; slot < QSBR_STATES_NR; slot++)
