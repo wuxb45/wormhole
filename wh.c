@@ -2471,7 +2471,6 @@ whunsafe_split_meta(struct wormhole * const map, struct wormleaf * const leaf2)
 
   const bool sr = wormhole_slab_reserve(map, mkey->klen);
   if (unlikely(!sr)) {
-    wormhmap_unlock(map);
     wormhole_free_mkey(mkey);
     return false;
   }
