@@ -3462,7 +3462,8 @@ wormhole_clean_helper(struct wormhole * const map)
 wormhole_clean(struct wormhole * const map)
 {
   wormhole_clean_helper(map);
-  wormhole_create_leaf0(map);
+  if (!wormhole_create_leaf0(map))
+    debug_die();
 }
 
   void
