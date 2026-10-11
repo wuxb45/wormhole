@@ -735,6 +735,7 @@ kvref_dup2_key(struct kvref * const ref, struct kv * const to)
     return NULL;
 
   *new = ref->hdr;
+  new->vlen = 0;
   memcpy(new->kv, ref->kptr, new->klen);
   return new;
 }

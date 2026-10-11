@@ -495,6 +495,12 @@ Supported key sets must not contain **129** (`WH_KPN + 1`) distinct keys sharing
 The maximum supported _anchor-key_ length is 65520 bytes (65536 minus the 16-byte `struct kv` header), while individual keys may be up to UINT32\_MAX bytes long.
 This is a caller precondition; exceeding it is not guaranteed to return an insertion failure.
 
+## Metadata Hash Collisions
+Rare pathological key patterns can produce more colliding metadata prefixes than the hash table's candidate buckets can hold. These patterns are unsupported; expanding the table cannot always resolve the collisions.
+For example, inserting 129 keys with the twelve-byte prefix `ef be ad de 00 00 00 00 00 00 00 00` and distinct final bytes `00` through `80` forces nine metadata prefixes into the same eight-entry bucket.
+The insertion can repeatedly expand the table until allocation fails and then wait for memory, rather than return false.
+This is a known limitation, considered unlikely to affect typical workloads; no collision-handling fallback is provided.
+
 ## Memory Allocation
 Insertions/updates can fail and return false when a memory allocation fails.
 On memory-allocation failure, the hash-table expansion function will block and wait for available memory.
