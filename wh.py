@@ -111,7 +111,7 @@ class WhRef:
         vlen = c_uint()
         ret = libwh.wh_get(self.refptr, binkey, len(binkey), self.vbuf, self.vbufsz, byref(vlen))
         if ret and vlen.value <= self.vbufsz:
-            return msgpack.unpackb(self.vbuf.value)
+            return msgpack.unpackb(self.vbuf[:vlen.value])
         else:
             return None
 
@@ -157,8 +157,7 @@ class WhIter:
         vlen = c_uint()
         ret = libwh.wh_iter_peek(self.iptr, self.kbuf, self.kbufsz, byref(klen), self.vbuf, self.vbufsz, byref(vlen))
         if ret and klen.value <= self.kbufsz and vlen.value <= self.vbufsz:
-            self.kbuf[klen.value] = b'\x00'
-            return (self.kbuf.value.decode(), klen.value, msgpack.unpackb(self.vbuf.value), vlen.value)
+            return (self.kbuf[:klen.value].decode(), klen.value, msgpack.unpackb(self.vbuf[:vlen.value]), vlen.value)
         else:
             return None
 
