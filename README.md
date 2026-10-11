@@ -4,6 +4,15 @@ The Wormhole index structure was introduced in paper ["Wormhole: A Fast Ordered 
 by Xingbo Wu, Fan Ni, and Song Jiang ([ACM DL](https://dl.acm.org/citation.cfm?id=3303955)).
 This repository maintains a reference implementation of the Wormhole index structure.
 
+## License
+
+Wormhole is available under either the GNU General Public License version 3
+or the MIT License, at your option (`GPL-3.0-only OR MIT`).
+You may choose either license; you do not need to comply with both.
+See [LICENSE](LICENSE) for the GPLv3 terms and [LICENSE-MIT](LICENSE-MIT) for the MIT terms.
+
+## Supported Platforms
+
 It supports Linux/FreeBSD/MacOS on x86\_64 and AArch64 CPUs.
 On x86\_64, Wormhole requires SSE4.2.
 On AArch64, Wormhole requires NEON SIMD and the `crc` features on the target CPU.

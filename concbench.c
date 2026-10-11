@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2018-2019  Wu, Xingbo <wuxb45@gmail.com>
  *
- * All rights reserved. No warranty, explicit or implicit, provided.
+ * SPDX-License-Identifier: GPL-3.0-only OR MIT
  */
 #define _GNU_SOURCE
 #include <string.h>

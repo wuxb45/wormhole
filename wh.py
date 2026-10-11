@@ -3,7 +3,7 @@
 #
 # Copyright (c) 2016--2021  Wu, Xingbo <wuxb45@gmail.com>
 #
-# All rights reserved. No warranty, explicit or implicit, provided.
+# SPDX-License-Identifier: GPL-3.0-only OR MIT
 #
 
 import msgpack
