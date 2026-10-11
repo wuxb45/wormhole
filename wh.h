@@ -45,6 +45,8 @@ wormhole_inpw(struct wormref * const ref, const struct kref * const key,
   extern bool
 wormhole_del(struct wormref * const ref, const struct kref * const key);
 
+// Delete [start, end); return the number deleted.
+// start must be valid; end must be >= start or NULL (+inf).
   extern u64
 wormhole_delr(struct wormref * const ref, const struct kref * const start,
     const struct kref * const end);
@@ -136,6 +138,7 @@ whsafe_inpw(struct wormref * const ref, const struct kref * const key,
   extern bool
 whsafe_del(struct wormref * const ref, const struct kref * const key);
 
+// Same bounds and return value as wormhole_delr.
   extern u64
 whsafe_delr(struct wormref * const ref, const struct kref * const start,
     const struct kref * const end);
@@ -189,6 +192,7 @@ whunsafe_inp(struct wormhole * const map, const struct kref * const key,
   extern bool
 whunsafe_del(struct wormhole * const map, const struct kref * const key);
 
+// Same bounds and return value as wormhole_delr; requires external synchronization for concurrent use.
   extern u64
 whunsafe_delr(struct wormhole * const map, const struct kref * const start,
     const struct kref * const end);
@@ -273,6 +277,9 @@ wh_inpw(struct wormref * const ref, const void * const kbuf, const u32 klen,
 wh_merge(struct wormref * const ref, const void * const kbuf, const u32 klen,
     kv_merge_func uf, void * const priv);
 
+// Delete [start, end); return the number deleted. Finite bounds require start <= end.
+// A NULL buffer requires zero length: start means the empty key, end means +inf.
+// A non-NULL zero-length buffer means the empty key. wh_delr(ref, NULL, 0, NULL, 0) deletes all keys.
   extern u64
 wh_delr(struct wormref * const ref, const void * const kbuf_start, const u32 klen_start,
     const void * const kbuf_end, const u32 klen_end);

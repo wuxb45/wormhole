@@ -24,7 +24,7 @@ It has also been tested on a Raspberry PI 4 running 64-bit ArchlinuxArm, and a J
 * See `wh.py` for a brief example of using Wormhole in Python.
 
 * An old limitation about anchor keys has been removed (See Section 3.3 in the original paper for more details).
-Now Wormhole can store binary string keys of any patterns including any number of '\0's. A key's length can be 0 to UINT32\_MAX bytes. (Internally: leaf-nodes' anchor key length <= UINT16\_MAX).
+Now Wormhole can store binary string keys of any patterns including any number of '\0's. A key's length can be 0 to UINT32\_MAX bytes. (Internally: leaf-nodes' anchor key length must not exceed 65520 bytes; see Key Patterns below).
 
 * `wh.h` provides a user-friendly interface. See `easydemo.c` for coding examples. the `wh_` functions are thread-safe.
 
@@ -65,6 +65,7 @@ Alternatively, you may use `O=0g` to enable debug info and disable optimizations
 
 The `wh_{ref/unref/get/put/del/probe}` and  `wh_iter_{create/destroy/seek/skip/peek/park/valid}` functions are all thread-safe.
 Each thread should acquire a private reference using `wh_ref` for KV operations.
+Do not share references or iterators between threads. `wh_clean` and `wh_destroy` require exclusive access to the index.
 
 `concbench.out` is an example benchmarking tool of only 150 LoC. See the helper messages for more details.
 It generates six-word keys based on a word list (words.txt). See `sprintf` in `concbench.c`.
@@ -110,11 +111,20 @@ Coding examples:
     r = wh_iter_valid(iter); // r == true; on the zero-sized key now
     wh_iter_destroy(iter); // now we're done with the iter
     wh_del(ref, "hello", 5); // delete a key
-    wh_del(ref, NULL, NULL); // delete the zero-sized key
+    wh_del(ref, NULL, 0); // delete the zero-sized key
     wh_unref(ref); // the current thread is no longer interested in accessing the index
     wh_destroy(wh); // fully destroy the index; all references should have been released before calling this
 }
 ```
+
+## Range deletion
+
+`wh_delr(ref, start, start_len, end, end_len)` deletes `[start, end)` and returns the number of keys deleted.
+Finite bounds require `start <= end`; equal bounds delete nothing.
+Use `(NULL, 0)` for the empty start key or an unbounded end (`+inf`), and `("", 0)` for a finite empty key.
+`wh_delr(ref, NULL, 0, NULL, 0)` deletes all keys, including the empty key.
+
+Compatibility: a `(NULL, 0)` end now means `+inf`, not the empty key.
 
 ## Integer keys
 
@@ -146,12 +156,12 @@ However, inefficient use of these APIs, such as repeatedly calling malloc() to p
 
 ## `struct kv` and `struct kref`
 
-There are a handful of helper functions (`kv_*` and `kref_*` functions) at the beginning of wh.h.
+The key and value helpers (`kv_*` and `kref_*`) are declared in `kv.h`.
 It's worth noting that the *key's hash* (`hash` of `struct kv` and `hash32` of `struct kref`)
 must be up-to-date before passed to wormhole.
-The `kv_refill*` helper functions internally update the hash after filling the kv contents.
+`kv_refill()` computes the hash; `kv_refill_kref*()` reuses the supplied key-reference hash, and `kv_refill_value()` leaves the key unchanged.
 In a more general case, `kv_update_hash` directly updates a `struct kv`'s hash.
-Similarly, `kref_refill_hash32()` calculates the 32-bit hash for `struct kref`.
+Similarly, `kref_ref_hash32()` initializes a key reference and computes its hash; `kref_update_hash32()` recomputes an existing reference's hash.
 Performing the hash calculation at the client side can achieve the best efficiency on the server (the index operations).
 
 ## The Wormhole API
@@ -303,7 +313,7 @@ The following example could cause deadlock between two threads.
 // Thread B already acquired the lock and wants to insert a key to wh
 {
     lock(just_a_lock);
-    wormhole_put(ref, kv); << block here forever
+    wormhole_put(ref, kv); // << block here forever
 }
 ```
 
@@ -327,7 +337,8 @@ To avoid this scenario, thread A should either call `wormhole_park(ref)` before 
 }
 ```
 
-The above issues with QSBR are specific to the `wormhole` API. `whsafe` does not have these issues.
+The above reference-management requirements apply to `wormhole` point operations; `whsafe` point operations park automatically.
+With either API, park or destroy an iterator before blocking, even if it has reached the end.
 
 ### The `whunsafe` API
 A set of *thread-unsafe* functions are also provided. See the functions with _prefix_ `whunsafe`.
@@ -349,7 +360,7 @@ Simply feed them with the pointer to the wormhole index:
 ```
 
 ### In-place update with user-defined function
-`wormhole_inp` executes a user-defined function on an existing key-value item.
+`wormhole_inpw` executes a user-defined function under a leaf's write lock.
 If the key does not exist, a NULL pointer will be passed to the user-defined function.
 A simple example would be incrementing a counter stored in a key-value pair.
 
@@ -370,16 +381,17 @@ A simple example would be incrementing a counter stored in a key-value pair.
     wormhole_put(ref, tmp);
 
     // perform +1 on the stored value
-    struct kref kref = kv_ref(tmp); // create a kref of tmp
-    wormhole_inp(ref, &kref, myadd1, NULL);
+    struct kref kref = kv_kref(tmp); // create a kref of tmp
+    wormhole_inpw(ref, &kref, myadd1, NULL);
+    free(tmp);
 }
 ```
 
 Note that the user-defined function should ONLY change the value's content, and nothing else.
 Otherwise, the index can be corrupted.
-A similar mechanism is also provided for iterators (`wormhole_iter_inp`).
+`wormhole_inpr` and `wormhole_iter_inp` use read locks, so their callbacks must not perform unsynchronized value writes.
 
-The inplace function can also be used to retrieve key-value data. For example:
+Use `wormhole_inpr` to retrieve key-value data without copying the entire KV. For example:
 
 ```C
 {
@@ -395,20 +407,19 @@ The inplace function can also be used to retrieve key-value data. For example:
     ...
     struct kref kref = ...
     u64 val;
-    wormhole_inp(ref, &kref, inplace_getu64, &val);
+    wormhole_inpr(ref, &kref, inplace_getu64, &val);
 }
 ```
 
 ### `merge`: atomic Read-Modify-Write
 The `wormhole_merge` and `whsafe_merge` functions perform atomic Read-Modify-Write (RMW) operations.
-In a RMW operation, if the search key is found, the KV pair will be passed to a user-defined callback function `uf` (short for user function).
-Otherwise, a NULL pointer is passed to `uf`.
-`uf` could update the KV in-place if it does not require any memory reallocation.
-In such a case, `uf` should return the KV's pointer back and the merge function will do nothing else.
-If `uf` want to replace the KV with something new, it should return a pointer that is different than the original KV pointer.
-The `uf` should not make memory allocation by itself.
-Instead, the `merge` function will copy the returned KV and replace the existing KV with the newly created one.
-`uf` should not return NULL unless the key was not found.
+The callback `uf` receives the existing KV, or NULL if the key is absent, under a write lock.
+Return the existing pointer to keep an in-place value update that needs no reallocation, or a different KV pointer to replace or insert the item.
+The returned KV must retain the search key and its correct hash.
+Returning NULL requests no replacement or insertion, whether or not the key exists.
+
+The memory manager's `in` function handles replacement and insertion ownership: the default copies the returned KV.
+`wh_merge` on an index created by `wh_create` instead takes ownership of the returned replacement KV, which must be heap-allocated and must not be freed or reused by the caller.
 
 ### Iterator
 The `wormhole_iter_{seek,peek,skip,next,inp}` functions provide range-search functionalities.
@@ -416,12 +427,13 @@ If the search key does not exist, the `seek` operation will put the cursor on th
 `next` will return the item under the current cursor and move the cursor forward.
 `peek` is similar but does not move the cursor. For example, with keys `{1,3,5}`, `seek(2); r = next()` will see `r == 3`.
 
-Currently Wormhole does not provide `seek_for_less_equal()` and `prev()` for backward scanning. This feature will be added in the future.
+Wormhole supports forward scanning only; there is no `seek_for_less_equal()` or `prev()`.
+
+Park or destroy a positioned iterator before using its reference for other operations. Key and value references borrowed from an iterator are not guaranteed to remain valid after seek, skip, park, or destroy.
 
 # Memory management
 
-By default, Wormhole manages all the key-value data internally and only copies to or from a user-supplied
-buffer (a `struct kv` object).
+With `wormhole_create(NULL)`, Wormhole copies input KVs and copies output KVs into a supplied buffer or a newly allocated object.
 This draws a clear boundary in the memory space between the index structure and its users.
 After a call to any of the index operations, the caller can immediately free
 the buffer holding the key-reference or the key-value data.
@@ -434,7 +446,7 @@ This `struct kvmap_mm` structure shows an example:
 
 ```C
 {
-    const struct kvmap_mm kvmap_mm_ualloc {
+    const struct kvmap_mm kvmap_mm_ualloc = {
       .in = kvmap_mm_in_noop, // in wormhole_put(), store caller's kv in wh
       .out = kvmap_mm_out_dup, // but still make a copy in wormhole_get()
       .free = kvmap_mm_free_free, // call free() for delete/update
@@ -472,15 +484,16 @@ Compared to the default, `WH_KPN=256` can offer 5-10%+ higher point query and up
 However, range queries prefer a smaller node size such as 64.
 
 
-* `QSBR_STATES_NR` and `QSBR_SHARDS_NR` control the capacity (number of active references) of the QSBR RCU.
-The product of the two values is the capacity. For efficiency, `QSBR_STATES_NR` can be set to 23, 39, and 55, and `QSBR_SHARDS_NR` must be 2^n, n<=6.
-The defaults are 23 and 32, respectively. The QSBR registry can run out of space if there are a few hundred of threads, which is not a problem in practice.
+* In `lib.c`, `QSBR_STATES_NR` sets the slots per shard and `QSBR_SHARD_BITS` sets the shard count to `2^QSBR_SHARD_BITS`.
+Use 23, 39, or 55 slots per shard and at most 6 shard bits. The defaults are 23 slots and 5 bits (32 shards), for at most 736 registered references, including parked references.
+Registration can fail earlier if the selected shard is full.
 
 # Limitations
 
 ## Key Patterns
-A **split** operation will fail when **129** (`WH_KPN + 1`) keys share a common prefix of 65535+ bytes.
-In Wormhole, the maximum _anchor-key_ length is 65535 (2^16) bytes, which is shorter than the maximum key-length (2^32).
+Supported key sets must not contain **129** (`WH_KPN + 1`) distinct keys sharing a common prefix of 65520 or more bytes.
+The maximum supported _anchor-key_ length is 65520 bytes (65536 minus the 16-byte `struct kv` header), while individual keys may be up to UINT32\_MAX bytes long.
+This is a caller precondition; exceeding it is not guaranteed to return an insertion failure.
 
 ## Memory Allocation
 Insertions/updates can fail and return false when a memory allocation fails.

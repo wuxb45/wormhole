@@ -320,6 +320,8 @@ main(int argc, char ** argv)
     if (si.api->fprint)
       si.api->fprint(si.map, stdout);
 
+    kv_qsort(si.keys, si.nkeys);
+
     debug_perf_switch();
     for (u64 r = 0; r < nr; r++) {
       si.tot = 0;

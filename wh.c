@@ -3772,10 +3772,12 @@ wh_merge(struct wormref * const ref, const void * const kbuf, const u32 klen,
 wh_delr(struct wormref * const ref, const void * const kbuf_start, const u32 klen_start,
     const void * const kbuf_end, const u32 klen_end)
 {
+  debug_assert(kbuf_end || (klen_end == 0));
   struct kref kref_start, kref_end;
   kref_ref_hash32(&kref_start, kbuf_start, klen_start);
   kref_ref_hash32(&kref_end, kbuf_end, klen_end);
-  return wh_api->delr(ref, &kref_start, &kref_end);
+  const struct kref * const kref_end_ptr = kbuf_end ? &kref_end : NULL;
+  return wh_api->delr(ref, &kref_start, kref_end_ptr);
 }
 
   struct wormhole_iter *

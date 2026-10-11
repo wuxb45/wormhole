@@ -363,7 +363,8 @@ struct kvmap_api {
   // merge: put+callback on old/new keys; another name: read-modify-write
   // return true if successfull; return false on error
   bool        (* merge)   (void * const ref, const struct kref * const key, kv_merge_func uf, void * const priv);
-  // delete-range: delete all keys from start (inclusive) to end (exclusive)
+  // delete-range: delete [start, end); return the number deleted
+  // start must be valid; end must be >= start or NULL (+inf); equal bounds delete nothing
   u64         (* delr)    (void * const ref, const struct kref * const start, const struct kref * const end);
   // make everything persist; for persistent maps only
   void        (* sync)    (void * const ref);
